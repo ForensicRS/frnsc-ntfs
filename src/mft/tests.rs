@@ -243,12 +243,69 @@ fn timestomp_rule_fires_only_when_si_predates_fn() {
     );
     let m = mft(&b);
     let (a, _) = timestomp::check(&m.entry(42).unwrap().unwrap(), m.index().volume_created);
+    // Every $SI time backdated, the change time included.
     assert!(matches!(
         a.as_slice(),
-        [NtfsAnomaly::SiCreatedBeforeFnCreated { .. }]
+        [NtfsAnomaly::SiCreatedBeforeFnCreated {
+            second_sign: "si_changed_before_fn_created",
+            ..
+        }]
     ));
     let (a, _) = timestomp::check(&m.entry(43).unwrap().unwrap(), m.index().volume_created);
     assert!(a.is_empty());
+}
+
+#[test]
+fn si_before_fn_alone_is_an_indicator_and_a_second_sign_makes_it_an_anomaly() {
+    use crate::anomaly::NtfsIndicator;
+    use crate::time::NtfsTimes;
+    let mut b = MftBuilder::new();
+    // Installed file: original $SI created/modified (with sub-second ticks), but the change time
+    // moved on at install, after the $FN creation.
+    let installed = NtfsTimes {
+        created: T - 400 * DAY + 1_234_567,
+        modified: T - 400 * DAY + 1_234_567,
+        mft_modified: T + 7_654_321,
+        accessed: T + 7_654_321,
+    };
+    b.put(
+        42,
+        RecordBuilder::file(42, 1)
+            .std_info_times(&installed, 0x20, 0)
+            .file_name(5, 5, "installed.dll", T + 1_111)
+            .build(),
+    );
+    // Only created/modified backdated, but to whole seconds while $FN has ticks.
+    let whole = NtfsTimes {
+        created: T - 400 * DAY,
+        modified: T - 400 * DAY,
+        mft_modified: T + DAY,
+        accessed: T + DAY,
+    };
+    b.put(
+        43,
+        RecordBuilder::file(43, 1)
+            .std_info_times(&whole, 0x20, 0)
+            .file_name(5, 5, "stomped.exe", T + 1_111)
+            .build(),
+    );
+    let m = mft(&b);
+    let (a, i) = timestomp::check(&m.entry(42).unwrap().unwrap(), m.index().volume_created);
+    assert!(a.is_empty(), "{a:?}");
+    assert!(i.contains(&NtfsIndicator::SiCreatedBeforeFn), "{i:?}");
+    // Older than the volume, like any file deployed from an image: still only an indicator.
+    assert!(i.contains(&NtfsIndicator::SiCreatedBeforeVolume), "{i:?}");
+    let (a, _) = timestomp::check(&m.entry(43).unwrap().unwrap(), m.index().volume_created);
+    assert!(
+        matches!(
+            a.as_slice(),
+            [NtfsAnomaly::SiCreatedBeforeFnCreated {
+                second_sign: "si_whole_seconds",
+                ..
+            }]
+        ),
+        "{a:?}"
+    );
 }
 
 #[test]

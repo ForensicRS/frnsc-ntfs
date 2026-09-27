@@ -56,8 +56,15 @@ pub enum NtfsAnomaly {
     ParentCycle { at: u64 },
     /// Parent chain deeper than the resolver's cap.
     PathTooDeep { depth: usize },
-    /// `$STANDARD_INFORMATION` creation time is earlier than the `$FILE_NAME` creation time.
-    SiCreatedBeforeFnCreated { si: u64, fn_: u64 },
+    /// `$STANDARD_INFORMATION` creation time is earlier than the `$FILE_NAME` creation time, and a
+    /// second sign agrees (`second_sign`: `si_changed_before_fn_created` or `si_whole_seconds`).
+    /// The comparison alone is only the indicator
+    /// [`NtfsIndicator::SiCreatedBeforeFn`]: installed files keep their original `$SI` times.
+    SiCreatedBeforeFnCreated {
+        si: u64,
+        fn_: u64,
+        second_sign: &'static str,
+    },
     /// A run in a data run list is malformed or points outside the volume.
     RunlistMalformed { reason: &'static str },
     /// An `INDX` record failed its fixup check.
@@ -179,8 +186,9 @@ impl NtfsAnomaly {
             NtfsAnomaly::ParentCycle { .. } => "none known: indicates corruption",
             NtfsAnomaly::PathTooDeep { .. } => "a genuinely very deep directory tree, or corruption",
             NtfsAnomaly::SiCreatedBeforeFnCreated { .. } => {
-                "installers, archive extractors, WIM/image deployment and copy tools that preserve the \
-                 source creation time; otherwise the classic sign of timestomping"
+                "a copy tool that preserves every $SI time including the change time, or one that \
+                 writes whole seconds; otherwise timestomping (installers alone only raise the \
+                 si_created_before_fn indicator)"
             }
             NtfsAnomaly::RunlistMalformed { .. } => "disk damage or a partial overwrite of the record",
             NtfsAnomaly::IndexEntryStale { .. } => "directory indexes are updated lazily after a delete or rename",
@@ -273,8 +281,15 @@ impl fmt::Display for NtfsAnomaly {
             }
             NtfsAnomaly::ParentCycle { at } => write!(f, "parent chain loops at entry {at}"),
             NtfsAnomaly::PathTooDeep { depth } => write!(f, "parent chain deeper than {depth}"),
-            NtfsAnomaly::SiCreatedBeforeFnCreated { si, fn_ } => {
-                write!(f, "$SI created {si} < $FN created {fn_} (FILETIME)")
+            NtfsAnomaly::SiCreatedBeforeFnCreated {
+                si,
+                fn_,
+                second_sign,
+            } => {
+                write!(
+                    f,
+                    "$SI created {si} < $FN created {fn_} (FILETIME), and {second_sign}"
+                )
             }
             NtfsAnomaly::RunlistMalformed { reason } => write!(f, "data runs: {reason}"),
             NtfsAnomaly::IndxFixupMismatch { vcn } => {
@@ -326,6 +341,9 @@ pub enum NtfsIndicator {
     TimestampOutOfRange,
     /// `$SI` created is earlier than the volume's own `$MFT` creation.
     SiCreatedBeforeVolume,
+    /// `$SI` created is earlier than `$FN` created, with no second sign: what installers, image
+    /// deployment and copy tools leave on most system files.
+    SiCreatedBeforeFn,
 }
 
 impl NtfsIndicator {
@@ -334,6 +352,7 @@ impl NtfsIndicator {
             NtfsIndicator::SiWholeSeconds => "si_whole_seconds",
             NtfsIndicator::TimestampOutOfRange => "timestamp_out_of_range",
             NtfsIndicator::SiCreatedBeforeVolume => "si_created_before_volume",
+            NtfsIndicator::SiCreatedBeforeFn => "si_created_before_fn",
         }
     }
 }
@@ -366,7 +385,11 @@ mod tests {
                 found_sequence: 3,
             },
             NtfsAnomaly::ParentCycle { at: 7 },
-            NtfsAnomaly::SiCreatedBeforeFnCreated { si: 1, fn_: 2 },
+            NtfsAnomaly::SiCreatedBeforeFnCreated {
+                si: 1,
+                fn_: 2,
+                second_sign: "si_whole_seconds",
+            },
             NtfsAnomaly::RecordNumberMismatch {
                 stored: 1,
                 actual: 2,

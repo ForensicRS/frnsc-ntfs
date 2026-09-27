@@ -43,6 +43,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `si_created_before_fn_created` flagged 72,095 of 76,612 `$MFT` entries on a real Windows Server
+  2008 R2 triage, mostly installed files that keep their original `$SI` times, and produced one
+  High finding for all of them. `$SI created < $FN created` alone is now the indicator
+  `si_created_before_fn`. The anomaly (`TIMESTAMP_DIVERGENCE`) needs a second sign, named in
+  its message: the `$SI` change time is also before `$FN` created (every `$SI` time backdated,
+  which `SetFileTime` can't do), or the `$SI` times are whole seconds while the `$FN` ones are
+  not.
 - Loose metadata files exported with an extension or an encoded separator were not found:
   `$UsnJrnl_$J.bin` (forecopy, Brimor Labs), `$MFT.bin`, `$J.raw`, `$UsnJrnl%3a$J`. Names are
   now compared after decoding `%3A` and removing one `.bin`, `.raw` or `.dat`, for discovery and
