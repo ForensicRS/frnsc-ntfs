@@ -194,4 +194,30 @@ mod volume {
             assert_eq!(bytes, expected(&rel), "{rel}");
         }
     }
+
+    #[test]
+    fn deleted_files_through_the_core_capability_are_byte_exact() {
+        let Some(fs) = open() else { return };
+        let deleted = fs.as_deleted().unwrap();
+        let (entries, report) = deleted.deleted_entries(FPath::new("")).unwrap();
+        assert_eq!(report.admitted, 2);
+        for e in entries.iter().map(|r| r.value()) {
+            let rel = e
+                .path
+                .as_ref()
+                .expect("mkntfs sample paths resolve")
+                .to_string();
+            assert!(e.content_readable, "{rel}: {}", e.content_status);
+            let mut bytes = Vec::new();
+            std::io::Read::read_to_end(
+                &mut deleted
+                    .open_deleted(FPath::new(""), e.id)
+                    .unwrap()
+                    .into_value(),
+                &mut bytes,
+            )
+            .unwrap();
+            assert_eq!(bytes, expected(&rel), "{rel}");
+        }
+    }
 }

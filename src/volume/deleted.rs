@@ -20,12 +20,12 @@ use std::sync::Arc;
 use forensic_rs::prelude::*;
 use forensic_rs::provenance::{Locus, Recovery};
 use forensic_rs::recovery::{Recovered, RecoveryReport};
-use forensic_rs::traits::vfs::VMetadata;
+use forensic_rs::traits::vfs::{DeletedEntry, DeletedFiles, VMetadata};
 
 use super::fs::{metadata_of, NtfsFs};
 use super::stream::SourceFile;
 use crate::anomaly::NtfsAnomaly;
-use crate::mft::{MftEntry, ResolvedPath};
+use crate::mft::{MftEntry, PathStatus, ResolvedPath};
 use crate::reference::FileRef;
 use crate::runlist::Run;
 
@@ -68,6 +68,8 @@ impl ContentStatus {
 #[derive(Debug, Clone)]
 pub struct DeletedFile {
     pub reference: FileRef,
+    /// The record's own primary `$FILE_NAME`, known even when its path can't be rebuilt.
+    pub name: Option<String>,
     pub path: ResolvedPath,
     pub metadata: VMetadata,
     pub content: ContentStatus,
@@ -81,10 +83,31 @@ struct Candidate {
     anomalies: Vec<NtfsAnomaly>,
 }
 
+/// One deleted-file scan: every deleted base record and the scan counters.
+pub(crate) type DeletedScan = (Vec<Recovered<DeletedFile>>, RecoveryReport);
+
 impl NtfsFs {
     /// Every deleted base record, with the verdict of the content gate. Unreadable records are
-    /// counted in the report, not returned.
-    pub fn deleted_files(&self) -> ForensicResult<(Vec<Recovered<DeletedFile>>, RecoveryReport)> {
+    /// counted in the report, not returned. The scan runs once per `NtfsFs`; later calls reuse it.
+    pub fn deleted_files(&self) -> ForensicResult<DeletedScan> {
+        Ok(self.cached_scan()?.as_ref().clone())
+    }
+
+    fn cached_scan(&self) -> ForensicResult<Arc<DeletedScan>> {
+        let mut cache = self
+            .deleted_scan
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(scan) = cache.as_ref() {
+            return Ok(Arc::clone(scan));
+        }
+        // A failed scan is not cached: the next call tries again.
+        let scan = Arc::new(self.scan_deleted()?);
+        *cache = Some(Arc::clone(&scan));
+        Ok(scan)
+    }
+
+    fn scan_deleted(&self) -> ForensicResult<DeletedScan> {
         let vol = self.volume();
         let bitmap = vol.bitmap()?;
         let mut report = RecoveryReport::default();
@@ -172,6 +195,7 @@ impl NtfsFs {
             };
             let file = DeletedFile {
                 reference: c.entry.reference,
+                name: c.entry.primary_name().map(|n| n.name.clone()),
                 path: vol.mft.path_of(&c.entry),
                 metadata: metadata_of(&c.entry),
                 content: c.status,
@@ -222,6 +246,73 @@ impl NtfsFs {
             },
         ))
     }
+}
+
+/// The generic view of [`NtfsFs::deleted_files`], so tools reach deleted files through any
+/// wrapper (`ContainerFs`, a chroot) without knowing the backend. `id` is the file reference
+/// ([`FileRef::raw`]). What this view leaves out -- the [`PathStatus`] of a path that could not be
+/// rebuilt, and the [`NtfsAnomaly`]s -- stays available through `deleted_files`.
+///
+/// `scope` must be the volume root (`""` or `"/"`): an `NtfsFs` is one volume.
+impl DeletedFiles for NtfsFs {
+    fn deleted_entries(&self, scope: &FPath) -> ForensicResult<DeletedEntriesScan> {
+        check_scope(scope)?;
+        let scan = self.cached_scan()?;
+        let entries = scan
+            .0
+            .iter()
+            .cloned()
+            .map(|r| r.map(|f| to_entry(&f)))
+            .collect();
+        Ok((entries, scan.1))
+    }
+
+    fn open_deleted(
+        &self,
+        scope: &FPath,
+        id: u64,
+    ) -> ForensicResult<Recovered<Box<dyn VirtualFile>>> {
+        check_scope(scope)?;
+        let scan = self.cached_scan()?;
+        let reference = FileRef::from_raw(id);
+        let file = scan
+            .0
+            .iter()
+            .map(|r| r.value())
+            .find(|f| f.reference == reference)
+            .ok_or_else(|| {
+                ForensicError::other("ntfs", format!("no deleted record {reference} in the scan"))
+            })?;
+        NtfsFs::open_deleted(self, file)
+    }
+}
+
+type DeletedEntriesScan = (Vec<Recovered<DeletedEntry>>, RecoveryReport);
+
+fn check_scope(scope: &FPath) -> ForensicResult<()> {
+    match scope.as_str() {
+        "" | "/" | "\\" => Ok(()),
+        other => Err(ForensicError::other(
+            "ntfs",
+            format!("an NTFS volume has no nested scope '{other}'; use the volume root"),
+        )),
+    }
+}
+
+/// A path only when every link to the root was verified; never the `$Orphan` re-rooting.
+fn to_entry(f: &DeletedFile) -> DeletedEntry {
+    let mut entry = DeletedEntry::new(f.reference.raw(), f.metadata.clone())
+        .with_content(f.content.is_readable(), f.content.name());
+    if matches!(
+        f.path.status,
+        PathStatus::Resolved | PathStatus::ParentDeleted
+    ) {
+        entry = entry.with_path(f.path.path.trim_start_matches('\\').replace('\\', "/"));
+    }
+    if let Some(name) = &f.name {
+        entry = entry.with_name(name.clone());
+    }
+    entry
 }
 
 /// Marks both sides of any overlap between recoverable candidates.

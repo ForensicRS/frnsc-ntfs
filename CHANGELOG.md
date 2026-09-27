@@ -24,12 +24,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `$Boot` (`boot::BootSector`).
 - **`volume` feature:**
   - `volume::Volume` and `NtfsFs`: a read-only `FileSystem` with `AlternateStreams`,
-    `Unallocated`, `PathAttributes` and `MediaMap`.
+    `Unallocated`, `PathAttributes`, `MediaMap` and `DeletedFiles`.
   - `NtfsFormatFactory`, with `HopCost::View`.
   - Data runs, sparse data, the valid data length, LZNT1 compression units, and a fragmented
     `$MFT`.
   - `$MFTMirr` and backup boot sector checks.
   - Deleted-file content recovery behind a `$Bitmap` and cross-claim gate (`deleted_files`,
-    `open_deleted`), and `index_slack`.
+    `open_deleted`), and `index_slack`. The same files are reachable through the core
+    `DeletedFiles` capability (`fs.as_deleted()`, id = file reference), so tools find them
+    through `ContainerFs` paths such as `disk.raw/p1`. A path that can't be verified to the root is
+    `None` there; `deleted_files` keeps its `PathStatus` and anomalies. The scan runs once per
+    `NtfsFs`, and `DeletedFile` gained the record's own `name`.
 - `NtfsAnomaly` (each with a benign explanation) and `NtfsIndicator`.
 - Examples `mft_dump` and `volume_ls`.

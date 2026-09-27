@@ -1,7 +1,7 @@
 //! `NtfsFs`: a mounted NTFS volume as a read-only forensic-rs `FileSystem`.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use forensic_rs::prelude::*;
 use forensic_rs::traits::vfs::VMetadata;
@@ -20,6 +20,9 @@ pub struct NtfsFs {
     vol: Arc<Volume>,
     parent: EvidenceLocator,
     source: SourceKind,
+    /// The deleted-file scan, run once: the volume is read-only, and a content verdict needs the
+    /// whole scan (cross-claims), so [`DeletedFiles::open_deleted`] by id reuses it.
+    pub(super) deleted_scan: Mutex<Option<Arc<super::deleted::DeletedScan>>>,
 }
 
 impl NtfsFs {
@@ -28,6 +31,7 @@ impl NtfsFs {
             vol,
             parent,
             source,
+            deleted_scan: Mutex::new(None),
         }
     }
 
@@ -207,6 +211,10 @@ impl FileSystem for NtfsFs {
     }
 
     fn as_media_map(&self) -> Option<&dyn MediaMap> {
+        Some(self)
+    }
+
+    fn as_deleted(&self) -> Option<&dyn DeletedFiles> {
         Some(self)
     }
 }

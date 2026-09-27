@@ -39,12 +39,15 @@ use forensic_rs::prelude::*;
 
 let fs = NtfsFs::from_volume(Volume::from_reader(std::fs::File::open("vol.img")?)?);
 let data = fs.read_all(FPath::new("Windows/System32/drivers/etc/hosts"))?;
-let (deleted, report) = fs.deleted_files()?;
-for f in &deleted {
-    if f.value().content.is_readable() {
-        let file = fs.open_deleted(f.value())?; // Recovered<Box<dyn VirtualFile>>
+// Generic: works the same through ContainerFs ("disk.raw/p1" as the scope).
+let deleted = fs.as_deleted().unwrap();
+let (entries, report) = deleted.deleted_entries(FPath::new(""))?;
+for e in entries.iter().map(|r| r.value()) {
+    if e.content_readable {
+        let file = deleted.open_deleted(FPath::new(""), e.id)?; // Recovered<Box<dyn VirtualFile>>
     }
 }
+// NTFS detail (path status, anomalies): fs.deleted_files()
 ```
 
 Examples: `cargo run -p frnsc-ntfs --example mft_dump -- '$MFT'` and

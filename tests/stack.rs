@@ -35,6 +35,8 @@ fn mounted() -> Arc<dyn FileSystem> {
     let mut b = VolumeBuilder::new(false);
     let w = b.dir(ROOT, "Windows");
     b.file(w, "notes.txt", b"inside ntfs inside gpt");
+    let gone = b.file(w, "gone.txt", b"deleted inside ntfs inside gpt");
+    b.delete(gone);
     let img = disk(&b.build());
     let base: Arc<dyn FileSystem> =
         Arc::new(InMemoryVirtualFileSystem::new().with_file("disk.raw", img));
@@ -54,6 +56,32 @@ fn reads_a_file_through_disk_partition_and_ntfs() {
         .read_all(FPath::new("disk.raw/p1/Windows/notes.txt"))
         .unwrap();
     assert_eq!(data, b"inside ntfs inside gpt");
+}
+
+#[test]
+fn deleted_files_are_reachable_through_the_container_path() {
+    let fs = mounted();
+    let deleted = fs.as_deleted().expect("ContainerFs forwards deleted files");
+    let scope = FPath::new("disk.raw/p1");
+    let (entries, report) = deleted.deleted_entries(scope).unwrap();
+    assert_eq!(report.admitted, 1);
+    let gone = entries
+        .iter()
+        .map(|r| r.value())
+        .find(|e| e.name.as_deref() == Some("gone.txt"))
+        .expect("the deleted file");
+    // Named in the outer namespace, so the path works against `fs` like any other.
+    assert_eq!(
+        gone.path.as_ref().map(|p| p.as_str()),
+        Some("disk.raw/p1/Windows/gone.txt")
+    );
+    let mut buf = Vec::new();
+    std::io::Read::read_to_end(
+        &mut deleted.open_deleted(scope, gone.id).unwrap().into_value(),
+        &mut buf,
+    )
+    .unwrap();
+    assert_eq!(buf, b"deleted inside ntfs inside gpt");
 }
 
 #[test]

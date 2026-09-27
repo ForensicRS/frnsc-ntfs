@@ -9,8 +9,9 @@ The workspace `AGENTS.md` applies. The rules below are specific to this crate.
     `recovery/`, `parser/`;
   - it reads through `source::RecordSource` and never names `ReadAt`.
 - **Volume layer:** `volume/`, behind the `volume` feature. It uses the forensic-rs storage-media
-  APIs (`ReadAt`, `HopCost`, `MediaMap`) through `volume::format::ReadAtSource`. Keep those types
-  out of the loose-file layer, so it builds against released forensic-rs.
+  APIs (`ReadAt`, `HopCost`, `MediaMap`) through `volume::format::ReadAtSource`, and implements the
+  core `DeletedFiles` capability (`volume/deleted.rs`). Keep those types out of the loose-file
+  layer, so it builds against released forensic-rs.
 - **Field names:** every `ntfs.*` key lives in `fields.rs`. Don't put string literals for field
   names anywhere else.
 - **Anomalies:** a new `NtfsAnomaly` variant needs `name()`, `flag()`, `benign_explanation()` and

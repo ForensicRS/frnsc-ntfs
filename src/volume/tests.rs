@@ -157,6 +157,78 @@ fn deleted_content_gate() {
 }
 
 #[test]
+fn deleted_files_through_the_core_capability() {
+    let mut b = VolumeBuilder::new(false);
+    let t = b.dir(ROOT, "Temp");
+    let gone = b.file(t, "payload.exe", &big(9000, 2));
+    let reused = b.file(t, "old.log", &big(9000, 3));
+    let lost = b.dir(ROOT, "Lost");
+    let orphan = b.file(lost, "orphan.txt", b"orphaned");
+    b.delete(gone);
+    b.delete(reused);
+    b.reuse_clusters(reused);
+    b.delete(orphan);
+    // Freed twice: its sequence no longer matches the child's parent reference.
+    b.delete(lost);
+    b.delete(lost);
+    let fs = open(b.build());
+    let deleted = fs.as_deleted().expect("NTFS keeps deleted records");
+
+    let (entries, report) = deleted.deleted_entries(FPath::new("")).unwrap();
+    let (files, inherent_report) = fs.deleted_files().unwrap();
+    assert_eq!(entries.len(), files.len());
+    assert_eq!(report, inherent_report);
+    let by_name = |n: &str| {
+        entries
+            .iter()
+            .map(|r| r.value())
+            .find(|e| e.name.as_deref() == Some(n))
+            .unwrap_or_else(|| panic!("{n}"))
+    };
+
+    let p = by_name("payload.exe");
+    assert_eq!(
+        p.path.as_ref().map(|p| p.as_str()),
+        Some("Temp/payload.exe")
+    );
+    assert!(p.content_readable);
+    let mut buf = Vec::new();
+    std::io::Read::read_to_end(
+        &mut deleted
+            .open_deleted(FPath::new(""), p.id)
+            .unwrap()
+            .into_value(),
+        &mut buf,
+    )
+    .unwrap();
+    assert_eq!(buf, big(9000, 2));
+
+    let r = by_name("old.log");
+    assert!(!r.content_readable);
+    assert_eq!(r.content_status, "reallocated");
+    assert!(deleted.open_deleted(FPath::new(""), r.id).is_err());
+
+    // A path that can't be verified to the root is not reported, but the name is.
+    let o = by_name("orphan.txt");
+    let status = files
+        .iter()
+        .find(|f| f.value().reference.raw() == o.id)
+        .map(|f| f.value().path.status)
+        .unwrap();
+    assert!(
+        !matches!(
+            status,
+            crate::mft::PathStatus::Resolved | crate::mft::PathStatus::ParentDeleted
+        ),
+        "{status:?}"
+    );
+    assert_eq!(o.path, None);
+
+    assert!(deleted.open_deleted(FPath::new(""), u64::MAX).is_err());
+    assert!(deleted.deleted_entries(FPath::new("Temp")).is_err());
+}
+
+#[test]
 fn damaged_volumes() {
     let mut b = VolumeBuilder::new(false);
     b.file(ROOT, "x.txt", b"x");
