@@ -22,6 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     mirror checks. Owner SIDs fill `file.uid` on MFT records, as do resident
     `$SECURITY_DESCRIPTOR`s.
   - `$Boot` (`boot::BootSector`).
+  - `$I30`, USN and `$SDS` records are tagged with the core `WindowsArtifacts::I30`, `UsnJrnl`
+    and `Secure` (serialized `Windows::I30`, `Windows::UsnJrnl`, `Windows::Secure`), not
+    `Other("NTFS_I30")`, `Other("UsnJrnl")` and `Other("NTFS_Secure_SDS")`.
 - **`volume` feature:**
   - `volume::Volume` and `NtfsFs`: a read-only `FileSystem` with `AlternateStreams`,
     `Unallocated`, `PathAttributes`, `MediaMap` and `DeletedFiles`.

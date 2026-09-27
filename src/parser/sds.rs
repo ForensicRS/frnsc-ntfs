@@ -15,7 +15,7 @@ use crate::secure::{self, SdsEntry};
 pub const MAX_SDS: u64 = 512 * 1024 * 1024;
 
 pub fn sds_artifact() -> Artifact {
-    Artifact::Windows(WindowsArtifacts::Other("NTFS_Secure_SDS".into()))
+    Artifact::Windows(WindowsArtifacts::Secure)
 }
 
 /// Reads and parses one `$SDS` file (bounded by [`MAX_SDS`]).

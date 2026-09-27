@@ -19,7 +19,7 @@ use crate::reference::FileRef;
 
 /// Artifact tag for `$I30` records.
 pub fn i30_artifact() -> Artifact {
-    Artifact::Windows(WindowsArtifacts::Other("NTFS_I30".into()))
+    Artifact::Windows(WindowsArtifacts::I30)
 }
 
 /// Options for [`I30ParserFactory`].

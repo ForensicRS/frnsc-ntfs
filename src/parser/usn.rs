@@ -15,7 +15,7 @@ use crate::usn::{reason_names, UsnReader, UsnRecord};
 
 /// Artifact tag for USN records.
 pub fn usn_artifact() -> Artifact {
-    Artifact::Windows(WindowsArtifacts::Other("UsnJrnl".into()))
+    Artifact::Windows(WindowsArtifacts::UsnJrnl)
 }
 
 /// Options for [`UsnParserFactory`].

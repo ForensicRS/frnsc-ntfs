@@ -41,3 +41,25 @@ pub(crate) fn sds_owners(
 ) -> Option<std::collections::BTreeMap<u32, String>> {
     sds::owners_for(fs, artifact)
 }
+
+#[cfg(test)]
+mod tests {
+    use forensic_rs::prelude::*;
+
+    #[test]
+    fn artifact_tags_are_core_variants_that_round_trip() {
+        for (artifact, expected) in [
+            (super::i30::i30_artifact(), WindowsArtifacts::I30),
+            (super::usn::usn_artifact(), WindowsArtifacts::UsnJrnl),
+            (super::sds::sds_artifact(), WindowsArtifacts::Secure),
+        ] {
+            assert_eq!(artifact, Artifact::Windows(expected));
+            let text = artifact.to_string();
+            assert_eq!(
+                forensic_rs::artifact::artifact_from_str(&text),
+                artifact,
+                "{text}"
+            );
+        }
+    }
+}
