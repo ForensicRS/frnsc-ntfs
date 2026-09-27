@@ -40,3 +40,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `NtfsFs`, and `DeletedFile` gained the record's own `name`.
 - `NtfsAnomaly` (each with a benign explanation) and `NtfsIndicator`.
 - Examples `mft_dump` and `volume_ls`.
+
+### Fixed
+
+- Loose metadata files exported with an extension or an encoded separator were not found:
+  `$UsnJrnl_$J.bin` (forecopy, Brimor Labs), `$MFT.bin`, `$J.raw`, `$UsnJrnl%3a$J`. Names are
+  now compared after decoding `%3A` and removing one `.bin`, `.raw` or `.dat`, for discovery and
+  for companion lookup.

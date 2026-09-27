@@ -1,8 +1,9 @@
 //! Finding loose NTFS metadata files in a VFS (KAPE/triage exports, extracted files).
 //!
 //! Collection tools spell stream names differently (`$UsnJrnl:$J`, `$UsnJrnl%3A$J`, `$J`), so each
-//! artifact has a list of accepted names, matched case-insensitively on the file name. Callers can
-//! add explicit glob patterns for anything else.
+//! artifact has a list of accepted names, matched case-insensitively on the file name after
+//! [normalize] (a percent-encoded `:`, and one export extension such as forecopy's and Brimor
+//! Labs' `$UsnJrnl_$J.bin`). Callers can add explicit glob patterns for anything else.
 
 use std::collections::BTreeSet;
 
@@ -84,9 +85,31 @@ fn glob(fs: &dyn FileSystem, pattern: &str) -> ForensicResult<Vec<FPathBuf>> {
     fs.glob(pattern)
 }
 
-/// Accepts exactly one of `names` (case-insensitive).
+/// Extensions export tools append to a metadata file's name (`$MFT.bin`, `$UsnJrnl_$J.bin`).
+const EXPORT_EXTENSIONS: &[&str] = &[".bin", ".raw", ".dat"];
+
+/// A file name as it would be on the volume: `%3A` decoded to `:`, and one trailing export
+/// extension removed (never the whole name).
+pub fn normalize(name: &str) -> String {
+    let decoded = name.replace("%3A", ":").replace("%3a", ":");
+    let lower = decoded.to_ascii_lowercase();
+    for ext in EXPORT_EXTENSIONS {
+        if lower.len() > ext.len() && lower.ends_with(ext) {
+            return decoded[..decoded.len() - ext.len()].to_string();
+        }
+    }
+    decoded
+}
+
+/// Whether `name`, once [normalize]d, is one of `names` (case-insensitive).
+fn is_one_of(names: &[&str], name: &str) -> bool {
+    let name = normalize(name);
+    names.iter().any(|x| x.eq_ignore_ascii_case(&name))
+}
+
+/// Accepts one of `names` (case-insensitive, after [normalize]).
 pub fn named(names: &'static [&'static str]) -> impl Fn(&str) -> bool {
-    move |n: &str| names.iter().any(|x| x.eq_ignore_ascii_case(n))
+    move |n: &str| is_one_of(names, n)
 }
 
 /// Looks for a companion file (e.g. `$Boot` next to `$MFT`) in the artifact's directory and up to
@@ -113,7 +136,7 @@ pub fn companion(fs: &dyn FileSystem, artifact: &FPath, names: &[&str]) -> Optio
                 e.path
                     .as_path()
                     .file_name()
-                    .is_some_and(|n| names.iter().any(|x| x.eq_ignore_ascii_case(n)))
+                    .is_some_and(|n| is_one_of(names, n))
             })
             .map(|e| e.path)
             .collect();
@@ -152,5 +175,33 @@ mod tests {
             Some(FPathBuf::from("case/C/$Boot"))
         );
         assert!(is_i30_name("Windows$I30"));
+    }
+
+    #[test]
+    fn exported_names_with_an_extension_match() {
+        // forecopy / Brimor Labs style: `_` for the stream separator and a `.bin` extension.
+        let fs = InMemoryVirtualFileSystem::new()
+            .with_file("host/CopiedFiles/ntfs/$MFT.bin", vec![1])
+            .with_file("host/CopiedFiles/ntfs/$UsnJrnl_$J.bin", vec![2])
+            .with_file("host/CopiedFiles/ntfs/$Secure_$SDS.BIN", vec![3])
+            .with_file("other/$J.raw", vec![4])
+            // The `$Max` stream's file, and a name that is only an extension, are not matches.
+            .with_file("host/CopiedFiles/ntfs/$UsnJrnl", vec![5])
+            .with_file("host/.bin", vec![6]);
+        let usn = find(&fs, &named(USN_NAMES), &[], 8);
+        assert_eq!(
+            usn.paths,
+            vec![
+                FPathBuf::from("host/CopiedFiles/ntfs/$UsnJrnl_$J.bin"),
+                FPathBuf::from("other/$J.raw"),
+            ]
+        );
+        assert_eq!(find(&fs, &named(SDS_NAMES), &[], 8).paths.len(), 1);
+        assert_eq!(
+            companion(&fs, usn.paths[0].as_path(), MFT_NAMES),
+            Some(FPathBuf::from("host/CopiedFiles/ntfs/$MFT.bin"))
+        );
+        assert_eq!(normalize("$UsnJrnl%3a$J"), "$UsnJrnl:$J");
+        assert_eq!(normalize(".bin"), ".bin");
     }
 }
