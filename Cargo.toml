@@ -1,0 +1,36 @@
+[package]
+name = "frnsc-ntfs"
+version = "0.1.0"
+authors = ["ForensicRS contributors"]
+keywords = ["forensic", "ntfs", "mft", "usnjrnl", "dfir"]
+categories = ["parsing", "filesystem"]
+description = "Pure rust NTFS parser for forensic-rs: $MFT, $I30, $UsnJrnl, $Secure and deleted-entry recovery"
+license = "MIT"
+edition = "2021"
+repository = "https://github.com/ForensicRS/frnsc-ntfs"
+# Test artifacts are fetched by forensic-testenv, never committed or published.
+exclude = ["/artifacts"]
+
+[dependencies]
+forensic-rs = "0.14"
+
+[features]
+# Mount a whole NTFS volume as a forensic-rs FileSystem (cluster I/O, data runs, deleted content
+# recovery). Needs the forensic-rs storage-media APIs (ReadAt, WindowReadAt, HopCost), which are
+# not released yet. Everything else (loose $MFT, $I30, $UsnJrnl:$J, $Secure:$SDS, $Boot) works
+# without it.
+default = []
+volume = []
+
+[dev-dependencies]
+# Resolved by the forensic-bootstrap workspace. When this crate gets its own CI outside the
+# workspace, switch to the git form (the workspace patches it back to the local copy):
+#   forensic-testdata = { git = "https://github.com/ForensicRS/forensic-testenv" }
+forensic-testdata = { workspace = true }
+# Disk -> partition -> NTFS stack test (feature `volume`). frnsc-vsys has no published repo yet,
+# so it is a sibling path dependency, used by tests only.
+frnsc-vsys = { path = "../frnsc-vsys" }
+
+[[example]]
+name = "volume_ls"
+required-features = ["volume"]
