@@ -19,7 +19,8 @@ use crate::anomaly::NtfsAnomaly;
 use crate::attr::attr_list::{self, MAX_ATTRIBUTE_LIST};
 use crate::boot::{BootSector, BOOT_SECTOR_SIZE};
 use crate::error;
-use crate::mft::{Mft, MftEntry, Slot};
+use crate::mft::mirror::MirrorComparison;
+use crate::mft::{Mft, MftEntry, MftMirr, Slot};
 use crate::record::attribute::{AttrBody, ATTR_ATTRIBUTE_LIST, ATTR_DATA};
 use crate::record::MftRecord;
 use crate::reference::{FileRef, ROOT_ENTRY};
@@ -97,6 +98,8 @@ pub struct Volume {
     pub mft_runs: Runlist,
     /// Volume-level anomalies (boot sector, truncation, `$MFTMirr`, `$MFT` run list).
     pub anomalies: Vec<NtfsAnomaly>,
+    /// The `$MFTMirr` cross-check, record by record with both sides, or why it could not run.
+    pub mirror: Result<MirrorComparison, String>,
     tree: OnceLock<Tree>,
     bitmap: OnceLock<Result<ClusterBitmap, String>>,
 }
@@ -154,38 +157,28 @@ impl Volume {
             mft,
             mft_runs,
             anomalies,
+            mirror: Err("not checked".to_string()),
             tree: OnceLock::new(),
             bitmap: OnceLock::new(),
         };
-        vol.check_mirror();
+        vol.mirror = vol.check_mirror();
+        match &vol.mirror {
+            Ok(c) => vol.anomalies.extend(c.anomaly()),
+            // Not a finding by itself: a volume too short to hold its own mirror already carries
+            // `VolumeTruncated`. The reason stays on `Volume::mirror` for the caller.
+            Err(why) => forensic_rs::warn!("$MFTMirr not checked: {}", why),
+        }
         Ok(vol)
     }
 
-    fn check_mirror(&mut self) {
-        let rs = u64::from(self.boot.mft_record_size);
-        let count = (self.boot.cluster_size / rs)
-            .max(4)
-            .min(self.mft.entry_count());
-        let Some(base) = self.boot.mftmirr_lcn.checked_mul(self.boot.cluster_size) else {
-            return;
-        };
-        let mut differs = Vec::new();
-        for i in 0..count {
-            let (Ok(a), Ok(b)) = (
-                self.mft.raw_record(i),
-                self.media.read_vec(base + i * rs, rs as usize),
-            ) else {
-                differs.push(i);
-                continue;
-            };
-            if a != b {
-                differs.push(i);
-            }
-        }
-        if !differs.is_empty() {
-            self.anomalies
-                .push(NtfsAnomaly::MftMirrMismatch { entries: differs });
-        }
+    /// Cross-checks the `$MFTMirr` at the LCN the **boot sector** declares against the `$MFT`.
+    ///
+    /// The locator is deliberately the boot sector's: asking the `$MFT` where its own mirror lives
+    /// would make the check circular. Each side's raw record bytes are kept on the result.
+    fn check_mirror(&self) -> Result<MirrorComparison, String> {
+        let mirr = MftMirr::at_boot_lcn(Arc::clone(&self.media), &self.boot)
+            .map_err(|e| format!("$MFTMirr at LCN {}: {e}", self.boot.mftmirr_lcn))?;
+        Ok(mirr.compare_with(&self.mft))
     }
 
     pub fn cluster_size(&self) -> u64 {

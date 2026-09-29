@@ -14,6 +14,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     extension records, `$SI`/`$FN` and the other attributes, full paths through deleted and
     reused parents, hard links, resident data of deleted files, timestomp checks, and names
     carved from record and `$INDEX_ROOT` slack.
+  - `$MFTMirr` (`mft::mirror::MftMirr`, parsed by `parser::MftParserFactory`): the mirrored copy
+    of the first records, and a record-by-record cross-check against the `$MFT` beside it. A
+    disagreement carries **both sides** — each one's raw record bytes as stored, the offset and the
+    stream that offset belongs to, the sequence and update sequence numbers as read, the header
+    fields that differ, and the first differing byte. `$MFT` and `$MFTMirr` share the catalog name
+    `NTFSMFTFiles`, so both are tagged `WindowsArtifacts::MFT`. A copy extracted with the fixups
+    already reverted (`ntfscat`) is `fixup_only`, not a mismatch. A `$MFTMirr` collected without
+    its `$MFT` is still parsed, and its summary says the check did not run.
   - `$I30` (`indx`, `parser::I30ParserFactory`): `INDX` records, and slack carving behind a
     parent-checked gate, cross-checked against a companion `$MFT`.
   - `$UsnJrnl:$J` (`usn`, `parser::UsnParserFactory`): V2, V3 and V4 records, sparse-prefix
@@ -31,7 +39,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `NtfsFormatFactory`, with `HopCost::View`.
   - Data runs, sparse data, the valid data length, LZNT1 compression units, and a fragmented
     `$MFT`.
-  - `$MFTMirr` and backup boot sector checks.
+  - Backup boot sector check, and the `$MFTMirr` cross-check at the LCN the **boot sector**
+    declares (asking the `$MFT` where its own mirror lives would be circular); the full result,
+    both sides included, is on `Volume::mirror`.
   - Deleted-file content recovery behind a `$Bitmap` and cross-claim gate (`deleted_files`,
     `open_deleted`), and `index_slack`. The same files are reachable through the core
     `DeletedFiles` capability (`fs.as_deleted()`, id = file reference), so tools find them

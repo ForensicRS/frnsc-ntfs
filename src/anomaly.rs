@@ -86,6 +86,9 @@ pub enum NtfsAnomaly {
     VolumeTruncated { declared: u64, actual: u64 },
     /// `$MFTMirr` records differ from the first `$MFT` records.
     MftMirrMismatch { entries: Vec<u64> },
+    /// The file offered as a `$MFTMirr` holds far more records than any mirror does; only the
+    /// first `read` were parsed and compared.
+    MftMirrOversized { records: u64, read: u64 },
     /// A deleted file's clusters are allocated again in `$Bitmap`: its content is gone.
     ClustersReallocated { clusters: u64 },
     /// Two deleted files claim the same free clusters: neither content can be attributed.
@@ -121,6 +124,7 @@ impl NtfsAnomaly {
             NtfsAnomaly::BootBackupMismatch => "boot_backup_mismatch",
             NtfsAnomaly::VolumeTruncated { .. } => "volume_truncated",
             NtfsAnomaly::MftMirrMismatch { .. } => "mft_mirr_mismatch",
+            NtfsAnomaly::MftMirrOversized { .. } => "mft_mirr_oversized",
             NtfsAnomaly::ClustersReallocated { .. } => "clusters_reallocated",
             NtfsAnomaly::DeletedCrossClaim { .. } => "deleted_cross_claim",
         }
@@ -152,7 +156,8 @@ impl NtfsAnomaly {
             NtfsAnomaly::RecordNumberMismatch { .. }
             | NtfsAnomaly::BootBackupUsed
             | NtfsAnomaly::BootBackupMismatch
-            | NtfsAnomaly::MftMirrMismatch { .. } => AnomalyFlags::SOURCE_DIVERGENCE,
+            | NtfsAnomaly::MftMirrMismatch { .. }
+            | NtfsAnomaly::MftMirrOversized { .. } => AnomalyFlags::SOURCE_DIVERGENCE,
             NtfsAnomaly::VolumeTruncated { .. } => AnomalyFlags::TRUNCATED,
             NtfsAnomaly::ClustersReallocated { .. } | NtfsAnomaly::DeletedCrossClaim { .. } => {
                 AnomalyFlags::ALLOCATION_CONFLICT
@@ -203,6 +208,10 @@ impl NtfsAnomaly {
             NtfsAnomaly::VolumeTruncated { .. } => "the image is shorter than the partition (incomplete acquisition)",
             NtfsAnomaly::MftMirrMismatch { .. } => {
                 "an interrupted write or a chkdsk repair; otherwise tampering with the first MFT records"
+            }
+            NtfsAnomaly::MftMirrOversized { .. } => {
+                "the file is not a $MFTMirr: a collection tool exported the wrong stream, or the \
+                 name was reused"
             }
             NtfsAnomaly::ClustersReallocated { .. } => "normal: freed clusters are reused by later writes",
             NtfsAnomaly::DeletedCrossClaim { .. } => {
@@ -317,6 +326,9 @@ impl fmt::Display for NtfsAnomaly {
             }
             NtfsAnomaly::MftMirrMismatch { entries } => {
                 write!(f, "$MFTMirr differs for entries {entries:?}")
+            }
+            NtfsAnomaly::MftMirrOversized { records, read } => {
+                write!(f, "$MFTMirr holds {records} records, only {read} read")
             }
             NtfsAnomaly::ClustersReallocated { clusters } => {
                 write!(

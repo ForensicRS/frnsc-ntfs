@@ -10,9 +10,13 @@ use forensic_rs::dictionary;
 use forensic_rs::prelude::testing::InMemoryVirtualFileSystem;
 use forensic_rs::prelude::*;
 use forensic_testdata::artifact_or_skip;
+use frnsc_ntfs::boot::BootSector;
 use frnsc_ntfs::fields as f;
-use frnsc_ntfs::mft::Mft;
+use frnsc_ntfs::fixup::FixupStatus;
+use frnsc_ntfs::mft::mirror::MIRRORED_RECORDS;
+use frnsc_ntfs::mft::{Mft, MftMirr, MirrorVerdict};
 use frnsc_ntfs::parser::{MftParserFactory, SdsParserFactory};
+use frnsc_ntfs::source::BytesSource;
 
 /// Expected content, rebuilt from the generator's inputs.
 fn expected(path: &str) -> Vec<u8> {
@@ -109,6 +113,128 @@ fn loose_mft_boot_and_sds_through_the_pipeline() {
     }
 }
 
+/// The real `$MFTMirr` of `ntfs-mkntfs-volume`, read out of the volume image at the LCN its own
+/// `$Boot` declares. `MIRRORED_RECORDS` records, so offsets below are relative to that file.
+///
+/// There is no loose `ntfs-mkntfs-mftmirr` artifact yet (the generator does not extract one, see
+/// FINDINGS.md), so it is cut from the registered volume instead of being invented.
+fn real_mirror() -> Option<(BootSector, Vec<u8>)> {
+    let boot = BootSector::parse(
+        &std::fs::read(forensic_testdata::artifact("ntfs-mkntfs-boot")?).unwrap(),
+    )
+    .unwrap();
+    let volume = std::fs::read(forensic_testdata::artifact("ntfs-mkntfs-volume")?).unwrap();
+    let at = (boot.mftmirr_lcn * boot.cluster_size) as usize;
+    let len = MIRRORED_RECORDS as usize * boot.mft_record_size as usize;
+    let bytes = volume
+        .get(at..at + len)
+        .expect("mirror is inside the image");
+    Some((boot, bytes.to_vec()))
+}
+
+#[test]
+fn real_mftmirr_agrees_with_the_real_mft() {
+    let mft_path = artifact_or_skip!("ntfs-mkntfs-mft");
+    let Some((boot, mirror)) = real_mirror() else {
+        return;
+    };
+    let mft = Mft::from_reader(std::fs::File::open(mft_path).unwrap()).unwrap();
+
+    // Ground truth from the volume itself: $MFTMirr (entry 1) is exactly four records long.
+    let entry = mft.entry(1).unwrap().expect("$MFTMirr has a record");
+    assert_eq!(
+        entry.primary_name().map(|n| n.name.as_str()),
+        Some("$MFTMirr")
+    );
+    assert_eq!(
+        entry.data().map(|d| d.size()),
+        Some(MIRRORED_RECORDS * u64::from(boot.mft_record_size))
+    );
+
+    let mirr = MftMirr::open(Box::new(BytesSource(mirror)), Some(&boot)).unwrap();
+    assert!(mirr.anomalies.is_empty(), "{:?}", mirr.anomalies);
+    assert_eq!(mirr.record_count(), MIRRORED_RECORDS);
+    let names: Vec<String> = mirr
+        .records()
+        .map(|r| {
+            let r = r.expect("every mirrored record parses");
+            let name = r
+                .attributes_of(0x30)
+                .filter_map(|a| a.resident_value())
+                .filter_map(|v| frnsc_ntfs::attr::FileName::parse(v).ok())
+                .map(|n| n.name)
+                .next();
+            name.unwrap_or_default()
+        })
+        .collect();
+    assert_eq!(names, ["$MFT", "$MFTMirr", "$LogFile", "$Volume"]);
+
+    let c = mirr.compare_with(&mft);
+    assert!(
+        c.agrees(),
+        "$MFT and $MFTMirr disagree on this volume: {}",
+        c.disagreements()
+            .map(|d| d.to_string())
+            .collect::<Vec<_>>()
+            .join("; ")
+    );
+    // ntfscat writes the loose $MFT with the fixups already reverted, while the mirror was read
+    // straight out of the image: the content agrees, the multi-sector protection does not.
+    let counts = c.counts();
+    assert_eq!(
+        (counts.compared, counts.divergent, counts.unreadable),
+        (MIRRORED_RECORDS, 0, 0)
+    );
+    assert_eq!(counts.fixup_only, MIRRORED_RECORDS);
+    for check in &c.checks {
+        assert_eq!(check.verdict, MirrorVerdict::FixupOnly);
+        assert_eq!(check.primary.fixup, Some(FixupStatus::PreApplied));
+        assert_eq!(check.mirror.fixup, Some(FixupStatus::Ok));
+        assert_eq!(check.primary.sequence, check.mirror.sequence);
+        assert_eq!(
+            check.primary.raw.as_deref().map(<[u8]>::len),
+            Some(boot.mft_record_size as usize)
+        );
+    }
+    assert_eq!(c.anomaly(), None);
+}
+
+#[test]
+fn real_mftmirr_through_the_pipeline() {
+    let mft = artifact_or_skip!("ntfs-mkntfs-mft");
+    let boot_path = artifact_or_skip!("ntfs-mkntfs-boot");
+    let Some((_, mirror)) = real_mirror() else {
+        return;
+    };
+    let fs: Arc<dyn FileSystem> = Arc::new(
+        InMemoryVirtualFileSystem::new()
+            .with_file("C/$MFT", std::fs::read(mft).unwrap())
+            .with_file("C/$Boot", std::fs::read(boot_path).unwrap())
+            .with_file("C/$MFTMirr", mirror),
+    );
+    let r = run(fs, vec![Arc::new(MftParserFactory::default())]);
+    assert!(r.result.errors.is_empty(), "{:?}", r.result.errors);
+
+    let entries = by_field(&r.records, f::RECORD_TYPE, f::RECORD_TYPE_MFTMIRR_ENTRY);
+    assert_eq!(entries.len(), MIRRORED_RECORDS as usize);
+    assert!(by_field(&r.records, f::RECORD_TYPE, f::RECORD_TYPE_MFTMIRR_CHECK).is_empty());
+
+    let summary = one(&r.records, f::RECORD_TYPE, f::RECORD_TYPE_MFTMIRR_SUMMARY);
+    assert_eq!(
+        summary.field_as_u64(f::MIRROR_COMPARED),
+        Some(MIRRORED_RECORDS)
+    );
+    assert_eq!(summary.field_as_u64(f::MIRROR_DIVERGENT), Some(0));
+    assert_eq!(
+        summary.field_as_u64(f::MIRROR_FIXUP_ONLY),
+        Some(MIRRORED_RECORDS)
+    );
+    assert!(
+        summary.anomalies().flags().is_empty(),
+        "no false $MFTMirr finding on a clean volume: {summary}"
+    );
+}
+
 #[test]
 fn loose_mft_library_api() {
     let mft = artifact_or_skip!("ntfs-mkntfs-mft");
@@ -139,6 +265,32 @@ mod volume {
         let vol = Volume::from_reader(std::fs::File::open(path).unwrap()).unwrap();
         assert!(vol.anomalies.is_empty(), "{:?}", vol.anomalies);
         Some(NtfsFs::from_volume(vol))
+    }
+
+    /// Both copies read out of the same image still carry their fixups, so a faithful mirror is
+    /// identical byte for byte here, not just after the fixups are applied.
+    #[test]
+    fn real_volume_mftmirr_agrees_byte_for_byte() {
+        let Some(path) = forensic_testdata::artifact("ntfs-mkntfs-volume") else {
+            return;
+        };
+        let vol = Volume::from_reader(std::fs::File::open(path).unwrap()).unwrap();
+        let c = vol.mirror.as_ref().expect("the $MFTMirr check ran");
+        assert_eq!(c.counts().compared, MIRRORED_RECORDS);
+        assert!(
+            c.agrees(),
+            "{}",
+            c.disagreements()
+                .map(|d| d.to_string())
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
+        assert_eq!(c.counts().identical, MIRRORED_RECORDS);
+        for check in &c.checks {
+            assert_eq!(check.primary.raw, check.mirror.raw);
+            assert_eq!(check.primary.fixup, Some(FixupStatus::Ok));
+        }
+        assert_eq!(c.anomaly(), None);
     }
 
     #[test]

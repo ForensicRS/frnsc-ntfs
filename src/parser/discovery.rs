@@ -11,6 +11,7 @@ use forensic_rs::core::fs::walk::WalkOptions;
 use forensic_rs::prelude::*;
 
 pub const MFT_NAMES: &[&str] = &["$MFT"];
+pub const MFTMIRR_NAMES: &[&str] = &["$MFTMirr"];
 pub const BOOT_NAMES: &[&str] = &["$Boot"];
 pub const USN_NAMES: &[&str] = &[
     "$J",

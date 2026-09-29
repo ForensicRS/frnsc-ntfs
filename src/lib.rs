@@ -1,7 +1,7 @@
 //! Pure Rust NTFS parser for forensic-rs.
 //!
-//! Every parser in this crate works on a **loose file**: an extracted `$MFT`, a `$I30` index
-//! allocation, a `$UsnJrnl:$J`, a `$Secure:$SDS` or a `$Boot`. None of them needs the disk image,
+//! Every parser in this crate works on a **loose file**: an extracted `$MFT`, a `$MFTMirr`, a
+//! `$I30` index allocation, a `$UsnJrnl:$J`, a `$Secure:$SDS` or a `$Boot`. None of them needs the disk image,
 //! a partition table or any other crate. The optional `volume` feature adds a whole-volume
 //! `FileSystem` on top of the same decoders.
 //!
@@ -68,5 +68,5 @@ pub mod fixtures;
 
 pub use anomaly::{NtfsAnomaly, NtfsIndicator};
 pub use boot::BootSector;
-pub use mft::{Mft, MftEntry};
+pub use mft::{Mft, MftEntry, MftMirr, MirrorComparison, MirrorVerdict};
 pub use reference::FileRef;

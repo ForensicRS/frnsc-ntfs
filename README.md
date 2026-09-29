@@ -1,7 +1,7 @@
 # frnsc-ntfs
 
-Pure Rust NTFS parser for [forensic-rs](https://github.com/ForensicRS/forensic-rs): `$MFT`, `$I30`,
-`$UsnJrnl:$J`, `$Secure:$SDS`, `$Boot`, and recovery of deleted entries. It parses loose metadata
+Pure Rust NTFS parser for [forensic-rs](https://github.com/ForensicRS/forensic-rs): `$MFT`,
+`$MFTMirr`, `$I30`, `$UsnJrnl:$J`, `$Secure:$SDS`, `$Boot`, and recovery of deleted entries. It parses loose metadata
 files on their own; with the `volume` feature it also mounts a whole volume.
 
 Part of the [ForensicRS](https://github.com/ForensicRS) ecosystem.
@@ -56,14 +56,14 @@ Examples: `cargo run -p frnsc-ntfs --example mft_dump -- '$MFT'` and
 ## Pipeline use
 
 Register the factories with a `TriagePipeline`. Each one finds its files in the run's VFS by name:
-`$MFT`; `$J`/`$UsnJrnl:$J`/`$UsnJrnl%3A$J`; `$SDS`/`$Secure:$SDS`/`$Secure%3A$SDS`; `*$I30`,
+`$MFT`; `$MFTMirr`; `$J`/`$UsnJrnl:$J`/`$UsnJrnl%3A$J`; `$SDS`/`$Secure:$SDS`/`$Secure%3A$SDS`; `*$I30`,
 `*.indx`. Extra glob patterns can be configured. Companion files are used when present: `$Boot`
 gives the MFT record size, `$SDS` gives owner SIDs, and a `$MFT` resolves paths for `$I30` and
 USN records.
 
 | Factory | Records |
 |---|---|
-| `MftParserFactory` (`windows.ntfs.mft`) | one per file (`ntfs.record_type = mft_entry`), deleted included; names carved from record and `$INDEX_ROOT` slack; one `mft_summary` |
+| `MftParserFactory` (`windows.ntfs.mft`) | one per file (`ntfs.record_type = mft_entry`), deleted included; names carved from record and `$INDEX_ROOT` slack; one `mft_summary`. For a `$MFTMirr`: one `mftmirr_entry` per mirrored record, one `mftmirr_check` per record where the two copies disagree, one `mftmirr_summary` |
 | `I30ParserFactory` (`windows.ntfs.i30`) | live index entries, and deleted entries carved from index slack |
 | `UsnParserFactory` (`windows.ntfs.usnjrnl`) | one event per journal record, with `@timestamp` and `event.action` |
 | `SdsParserFactory` (`windows.ntfs.sds`) | one per security descriptor: owner, group, DACL |
@@ -104,6 +104,15 @@ and raw (`*_raw`). A zero FILETIME gives no date.
   Otherwise the result is `Reallocated` or `CrossClaimed`, with an `ALLOCATION_CONFLICT`
   anomaly and no bytes. A reuse followed by a second free cannot be detected, which is why this
   content is never graded as allocated.
+- **`$MFT` vs `$MFTMirr`** is a comparison an analyst has to be able to audit, so a disagreement
+  never reduces to a boolean. Each `mftmirr_check` record names the record number and carries both
+  sides: `ntfs.mirror.primary.*` (the `$MFT`) and `ntfs.mirror.copy.*` (the `$MFTMirr`), each with
+  the whole record hex-encoded exactly as stored, the offset, **the stream that offset is relative
+  to**, the sequence and update sequence numbers, and the fixup status. `ntfs.mirror.verdict` is
+  `identical`, `fixup_only` (content agrees, only the multi-sector protection differs — what
+  `ntfscat` exports look like), `divergent` (with `ntfs.mirror.differing_fields` and
+  `ntfs.mirror.first_difference`) or `unreadable`. A `mftmirr_summary` is emitted either way, so
+  "checked and clean" is distinguishable from "not checked".
 - **Damage is recorded, not refused.** This covers torn records, bad or pre-applied fixups, a
   `BAAD` signature, record number mismatches, a truncated `$MFT`, a `$MFTMirr` mismatch, the
   backup boot sector being used, a truncated image, malformed runs, `$SDS` hash or mirror
@@ -124,6 +133,8 @@ Parsed:
 
 Not (yet) parsed:
 - `$LogFile`.
+- `$MFTMirr` beyond the four records NTFS keeps up to date: a mirror allocated a larger cluster is
+  read in full, but the padding slots are empty and compare as such.
 - WOF/CompactOS decompression (XPRESS/LZX). These files are reported with `ntfs.wof`; their
   stored bytes are the compressed stream.
 - EFS decryption: encrypted files return their raw ciphertext and set `ntfs.efs`.

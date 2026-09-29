@@ -8,6 +8,9 @@ pub const TIMESTAMP: &str = "@timestamp";
 pub const RECORD_TYPE: &str = "ntfs.record_type";
 pub const RECORD_TYPE_MFT_ENTRY: &str = "mft_entry";
 pub const RECORD_TYPE_MFT_SUMMARY: &str = "mft_summary";
+pub const RECORD_TYPE_MFTMIRR_ENTRY: &str = "mftmirr_entry";
+pub const RECORD_TYPE_MFTMIRR_CHECK: &str = "mftmirr_check";
+pub const RECORD_TYPE_MFTMIRR_SUMMARY: &str = "mftmirr_summary";
 pub const RECORD_TYPE_RECORD_SLACK_NAME: &str = "record_slack_name";
 pub const RECORD_TYPE_INDEX_ENTRY: &str = "index_entry";
 pub const RECORD_TYPE_INDEX_SLACK: &str = "index_slack";
@@ -130,6 +133,47 @@ pub const MFT_IN_USE: &str = "ntfs.mft.in_use";
 pub const MFT_DELETED: &str = "ntfs.mft.deleted";
 pub const MFT_SLACK_NAMES: &str = "ntfs.mft.slack_names_admitted";
 pub const MFT_SLACK_REJECTED: &str = "ntfs.mft.slack_names_rejected";
+
+// $MFTMirr and its cross-check against $MFT.
+//
+// A disagreement is a finding, so both sides travel with it: `*.record_hex` is the record exactly
+// as stored on that side (fixups **not** applied), and `*.offset` is relative to the start of the
+// stream named by `*.stream`, never to the volume or the image.
+/// Path of the `$MFTMirr` the records were read from.
+pub const MIRROR_SOURCE_PATH: &str = "ntfs.mirror.source";
+pub const MIRROR_RECORD_SIZE: &str = "ntfs.mirror.record_size";
+/// Record slots the `$MFTMirr` covers.
+pub const MIRROR_RECORDS: &str = "ntfs.mirror.records";
+/// Record slots actually read out of it (lower than `MIRROR_RECORDS` only when the file is far
+/// larger than any mirror; the difference is the `mft_mirr_oversized` anomaly).
+pub const MIRROR_READ: &str = "ntfs.mirror.read";
+/// `identical`, `fixup_only`, `divergent` or `unreadable`.
+pub const MIRROR_VERDICT: &str = "ntfs.mirror.verdict";
+/// Header fields whose decoded values differ, plus `body` for a difference past the header.
+pub const MIRROR_DIFFERING_FIELDS: &str = "ntfs.mirror.differing_fields";
+/// Offset of the first differing byte within the record, after fixups.
+pub const MIRROR_FIRST_DIFFERENCE: &str = "ntfs.mirror.first_difference";
+pub const MIRROR_PRIMARY_STREAM: &str = "ntfs.mirror.primary.stream";
+pub const MIRROR_PRIMARY_OFFSET: &str = "ntfs.mirror.primary.offset";
+pub const MIRROR_PRIMARY_HEX: &str = "ntfs.mirror.primary.record_hex";
+pub const MIRROR_PRIMARY_SEQUENCE: &str = "ntfs.mirror.primary.sequence";
+pub const MIRROR_PRIMARY_UPDATE_SEQUENCE: &str = "ntfs.mirror.primary.update_sequence";
+pub const MIRROR_PRIMARY_FIXUP: &str = "ntfs.mirror.primary.fixup";
+pub const MIRROR_PRIMARY_ERROR: &str = "ntfs.mirror.primary.error";
+pub const MIRROR_COPY_STREAM: &str = "ntfs.mirror.copy.stream";
+pub const MIRROR_COPY_OFFSET: &str = "ntfs.mirror.copy.offset";
+pub const MIRROR_COPY_HEX: &str = "ntfs.mirror.copy.record_hex";
+pub const MIRROR_COPY_SEQUENCE: &str = "ntfs.mirror.copy.sequence";
+pub const MIRROR_COPY_UPDATE_SEQUENCE: &str = "ntfs.mirror.copy.update_sequence";
+pub const MIRROR_COPY_FIXUP: &str = "ntfs.mirror.copy.fixup";
+pub const MIRROR_COPY_ERROR: &str = "ntfs.mirror.copy.error";
+pub const MIRROR_COMPARED: &str = "ntfs.mirror.compared";
+pub const MIRROR_IDENTICAL: &str = "ntfs.mirror.identical";
+pub const MIRROR_FIXUP_ONLY: &str = "ntfs.mirror.fixup_only";
+pub const MIRROR_DIVERGENT: &str = "ntfs.mirror.divergent";
+pub const MIRROR_UNREADABLE: &str = "ntfs.mirror.unreadable";
+/// Record numbers where the two copies disagree.
+pub const MIRROR_DISAGREEMENTS: &str = "ntfs.mirror.disagreements";
 
 // Index ($I30)
 pub const INDEX_DIRECTORY: &str = "ntfs.index.directory";

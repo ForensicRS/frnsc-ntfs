@@ -1,6 +1,6 @@
 //! `MftParserFactory`: every loose `$MFT` in the VFS -> one record per file.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use forensic_rs::prelude::*;
@@ -31,6 +31,8 @@ pub struct MftParserOptions {
     pub carve_record_slack: bool,
     /// Emit one `mft_summary` record per `$MFT`.
     pub summary: bool,
+    /// Parse `$MFTMirr` files too, and cross-check each against the `$MFT` it sits next to.
+    pub mirror: bool,
 }
 
 impl Default for MftParserOptions {
@@ -41,6 +43,7 @@ impl Default for MftParserOptions {
             resident_hex_max: 1024,
             carve_record_slack: true,
             summary: true,
+            mirror: true,
         }
     }
 }
@@ -63,10 +66,11 @@ impl MftParserFactory {
         Self {
             descriptor: ParserDescriptor::new(
                 "windows.ntfs.mft",
-                "NTFS $MFT",
+                "NTFS $MFT and $MFTMirr",
                 "Parses loose $MFT files: allocated and deleted entries, full paths, $SI/$FN \
                  timestamps with timestomp checks, resident data, alternate data streams and \
-                 names carved from record slack",
+                 names carved from record slack; parses $MFTMirr and cross-checks it against \
+                 the $MFT it sits next to",
                 env!("CARGO_PKG_VERSION"),
             )
             .with_artifacts(vec![Artifact::Windows(WindowsArtifacts::MFT)]),
@@ -106,12 +110,13 @@ impl ArtifactParserFactory for MftParserFactory {
                     return Ok(());
                 }
             }
+            let mut mirrors_done: BTreeSet<FPathBuf> = BTreeSet::new();
             for path in found.paths {
                 if cancellation.is_cancelled() {
                     return Ok(());
                 }
                 let cancelled = || cancellation.is_cancelled();
-                let flow = parse_one(
+                let (flow, mirror) = parse_one(
                     fs.as_ref(),
                     &path,
                     &host,
@@ -119,6 +124,42 @@ impl ArtifactParserFactory for MftParserFactory {
                     &store,
                     &opts,
                     &cancelled,
+                    out,
+                );
+                mirrors_done.extend(mirror);
+                if flow.is_stop() {
+                    return Ok(());
+                }
+            }
+            if !opts.mirror {
+                return Ok(());
+            }
+            // A `$MFTMirr` collected without its `$MFT` is still evidence: parse it on its own
+            // and let its summary say the cross-check did not run.
+            let mirrors = find(
+                fs.as_ref(),
+                &named(discovery::MFTMIRR_NAMES),
+                &[],
+                opts.max_depth,
+            );
+            for e in mirrors.errors {
+                if out.emit(Err(e)).is_stop() {
+                    return Ok(());
+                }
+            }
+            for path in mirrors.paths {
+                if cancellation.is_cancelled() || mirrors_done.contains(&path) {
+                    continue;
+                }
+                let boot = load_boot(fs.as_ref(), path.as_path());
+                let flow = super::mirror::parse_mirror(
+                    fs.as_ref(),
+                    path.as_path(),
+                    None,
+                    boot.as_ref(),
+                    &host,
+                    acquisition,
+                    &store,
                     out,
                 );
                 if flow.is_stop() {
@@ -130,6 +171,8 @@ impl ArtifactParserFactory for MftParserFactory {
     }
 }
 
+/// Parses one `$MFT` and, when `opts.mirror` is set, the `$MFTMirr` beside it. Returns the flow
+/// and the `$MFTMirr` path that was handled, so it is not parsed again on its own.
 #[allow(clippy::too_many_arguments)]
 fn parse_one(
     fs: &dyn FileSystem,
@@ -140,7 +183,7 @@ fn parse_one(
     opts: &MftParserOptions,
     cancelled: &dyn Fn() -> bool,
     out: &mut dyn ParserOutput,
-) -> OutputFlow {
+) -> (OutputFlow, Option<FPathBuf>) {
     let boot = load_boot(fs, path);
     let owners = super::sds_owners(fs, path);
     let mft = match fs
@@ -149,7 +192,7 @@ fn parse_one(
         .and_then(|src| Mft::open(Box::new(src), boot.as_ref(), cancelled))
     {
         Ok(m) => m,
-        Err(e) => return out.emit(Err(e.with_path(path))),
+        Err(e) => return (out.emit(Err(e.with_path(path))), None),
     };
     let source = store.register_source(SourceKey::Path(path.as_str().to_string()));
     let prov_allocated = source.mint(acquisition, Recovery::Allocated);
@@ -162,6 +205,57 @@ fn parse_one(
         owners: owners.as_ref(),
         resident_hex_max: opts.resident_hex_max,
     };
+    let provenance = EntryProvenance {
+        allocated: prov_allocated,
+        deleted: prov_deleted,
+        slack: prov_slack,
+    };
+    let flow = emit_entries(&ctx, &mft, path, opts, cancelled, provenance, out);
+    if flow.is_stop() || !opts.mirror {
+        return (flow, None);
+    }
+    // The `$MFTMirr` beside this `$MFT`, cross-checked against it.
+    let Some(mirror_path) = companion(fs, path, discovery::MFTMIRR_NAMES) else {
+        return (OutputFlow::Continue, None);
+    };
+    let flow = super::mirror::parse_mirror(
+        fs,
+        mirror_path.as_path(),
+        Some((&mft, path)),
+        boot.as_ref(),
+        host,
+        acquisition,
+        store,
+        out,
+    );
+    (flow, Some(mirror_path))
+}
+
+/// One provenance id per recovery grade of the same `$MFT`.
+#[derive(Debug, Clone, Copy)]
+struct EntryProvenance {
+    allocated: forensic_rs::provenance::ProvenanceId,
+    deleted: forensic_rs::provenance::ProvenanceId,
+    slack: forensic_rs::provenance::ProvenanceId,
+}
+
+/// Emits every entry of one `$MFT`, plus the names carved from its slack and its summary.
+#[allow(clippy::too_many_arguments)]
+fn emit_entries(
+    ctx: &SchemaContext<'_>,
+    mft: &Mft,
+    path: &FPath,
+    opts: &MftParserOptions,
+    cancelled: &dyn Fn() -> bool,
+    provenance: EntryProvenance,
+    out: &mut dyn ParserOutput,
+) -> OutputFlow {
+    let EntryProvenance {
+        allocated: prov_allocated,
+        deleted: prov_deleted,
+        slack: prov_slack,
+    } = provenance;
+    let host = ctx.host;
     let mut counts = SummaryCounts::default();
     for (i, item) in mft.entries().enumerate() {
         if (i as u64).is_multiple_of(CANCEL_POLL) && cancelled() {
@@ -183,7 +277,7 @@ fn parse_one(
             counts.deleted += 1;
             prov_deleted
         };
-        if out.emit(Ok(entry_record(&ctx, &entry, prov))).is_stop() {
+        if out.emit(Ok(entry_record(ctx, &entry, prov))).is_stop() {
             return OutputFlow::Stop;
         }
         if opts.carve_record_slack && !entry.slack.is_empty() {
@@ -197,7 +291,7 @@ fn parse_one(
             );
             for c in carved {
                 if out
-                    .emit(Ok(slack_name_record(&ctx, c.value(), prov_slack)))
+                    .emit(Ok(slack_name_record(ctx, c.value(), prov_slack)))
                     .is_stop()
                 {
                     return OutputFlow::Stop;
@@ -219,7 +313,7 @@ fn parse_one(
                             let d = index_record(
                                 host,
                                 path.as_str(),
-                                Some(&mft),
+                                Some(mft),
                                 fields::RECORD_TYPE_INDEX_SLACK,
                                 "slack",
                                 c.reference,
@@ -242,7 +336,7 @@ fn parse_one(
         }
     }
     if opts.summary {
-        return out.emit(Ok(summary_record(&ctx, &counts, prov_allocated)));
+        return out.emit(Ok(summary_record(ctx, &counts, prov_allocated)));
     }
     OutputFlow::Continue
 }

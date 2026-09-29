@@ -5,7 +5,7 @@
 //! (including a forensic-rs `VirtualFile`), so a loose file needs nothing else.
 
 use std::io::{Read, Seek, SeekFrom};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use forensic_rs::prelude::*;
 
@@ -94,6 +94,60 @@ impl<R: Read + Seek + Send> RecordSource for StreamSource<R> {
             }
         }
         Ok(done)
+    }
+
+    fn len(&self) -> u64 {
+        self.len
+    }
+}
+
+/// A fixed byte window of another source: a file that lives at a known place inside a larger
+/// stream (a metafile at its LCN in a volume image).
+///
+/// Offsets given to this source are relative to the **start of the window**, never to the stream
+/// it was cut from; [`WindowSource::start`] names where the window itself begins in that stream.
+pub struct WindowSource {
+    inner: Arc<dyn RecordSource>,
+    start: u64,
+    len: u64,
+}
+
+impl WindowSource {
+    /// `start` and `len` are in bytes, relative to the start of `inner`. The window must fit.
+    pub fn new(inner: Arc<dyn RecordSource>, start: u64, len: u64) -> ForensicResult<Self> {
+        let end = start
+            .checked_add(len)
+            .ok_or_else(|| error::invalid("window end overflows"))?;
+        if end > inner.len() {
+            return Err(ForensicError::buffer_too_small(
+                end as usize,
+                inner.len() as usize,
+                "ntfs window source",
+            ));
+        }
+        Ok(Self { inner, start, len })
+    }
+
+    /// Offset of the window in the stream it was cut from.
+    pub fn start(&self) -> u64 {
+        self.start
+    }
+}
+
+impl RecordSource for WindowSource {
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> ForensicResult<usize> {
+        let Some(available) = self.len.checked_sub(offset) else {
+            return Ok(0);
+        };
+        let want = usize::try_from(available.min(buf.len() as u64)).unwrap_or(0);
+        if want == 0 {
+            return Ok(0);
+        }
+        let at = self
+            .start
+            .checked_add(offset)
+            .ok_or_else(|| error::invalid("window read offset overflows"))?;
+        self.inner.read_at(at, &mut buf[..want])
     }
 
     fn len(&self) -> u64 {

@@ -5,8 +5,9 @@ The workspace `AGENTS.md` applies. The rules below are specific to this crate.
 ## Layout
 
 - **Loose-file layer (always built):**
-  - `boot`, `fixup`, `record/`, `attr/`, `runlist`, `mft/`, `indx/`, `usn/`, `secure/`,
-    `recovery/`, `parser/`;
+  - `boot`, `fixup`, `record/`, `attr/`, `runlist`, `mft/` (including `mft/mirror.rs`, the
+    `$MFTMirr` parser and the `$MFT` cross-check), `indx/`, `usn/`, `secure/`, `recovery/`,
+    `parser/`;
   - it reads through `source::RecordSource` and never names `ReadAt`.
 - **Volume layer:** `volume/`, behind the `volume` feature. It uses the forensic-rs storage-media
   APIs (`ReadAt`, `HopCost`, `MediaMap`) through `volume::format::ReadAtSource`, and implements the
@@ -36,7 +37,13 @@ The workspace `AGENTS.md` applies. The rules below are specific to this crate.
   extension, and has no `$FILE_NAME`. Don't emit it.
 - **Fixups:** some collectors (and `ntfscat`) export records with fixups already reverted. That
   is `FixupStatus::PreApplied`, which is consistent and not an anomaly. Only a mix of values is
-  `Torn`.
+  `Torn`. The same asymmetry is why a `$MFT`/`$MFTMirr` comparison applies the fixups to both
+  sides before deciding: raw bytes alone would call a clean volume a mismatch
+  (`MirrorVerdict::FixupOnly`).
+- **A cross-check carries both sides.** `$MFT` vs `$MFTMirr` is never reduced to a boolean: every
+  `MirrorRecordCheck` keeps each side's raw record bytes as stored, the offset *and the stream it
+  is relative to*, the sequence and update sequence numbers, and the fields that differ. Locate
+  the mirror from the **boot sector**, never from the `$MFT` (that would be circular).
 - **Recovery gates are strict.** Carved names must match the parent being scanned. Deleted
   content needs every stored cluster free and unclaimed. Don't add a fallback that returns
   partial content.
@@ -46,9 +53,11 @@ The workspace `AGENTS.md` applies. The rules below are specific to this crate.
 - **Unit tests** sit next to the code. Every parser has a truncated-prefix test and a
   random-corruption test (xorshift, no dependency).
 - **`tests/*_pipeline.rs` and `tests/kape_export.rs`** run the factories through `TriagePipeline`
-  (`tests/common`).
+  (`tests/common`). `tests/mftmirr_pipeline.rs` covers the `$MFTMirr` records and the cross-check.
 - **`tests/fs_conformance.rs`** runs `forensic_rs::fs_conformance_battery!` on `NtfsFs`.
 - **`tests/stack.rs`** checks disk → GPT (frnsc-vsys, a dev-dependency) → NTFS through
   `ContainerFs`.
 - **`tests/real_samples.rs`** uses the `ntfs-mkntfs-*` artifacts from
   `forensic-testenv/generators/ntfs_mkntfs.sh`. Its truth is rebuilt from the generator's inputs.
+  There is no loose `$MFTMirr` artifact yet, so the mirror tests cut it out of the registered
+  `ntfs-mkntfs-volume` at the LCN its `$Boot` declares — real bytes, nothing synthesised.

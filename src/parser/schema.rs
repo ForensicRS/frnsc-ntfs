@@ -34,6 +34,11 @@ pub struct SchemaContext<'a> {
 }
 
 fn artifact() -> Artifact {
+    mft_artifact()
+}
+
+/// Catalog tag shared by `$MFT` and `$MFTMirr` (the KB lists both under `NTFSMFTFiles`).
+pub fn mft_artifact() -> Artifact {
     Artifact::Windows(WindowsArtifacts::MFT)
 }
 

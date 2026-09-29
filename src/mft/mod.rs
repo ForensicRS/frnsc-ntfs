@@ -2,6 +2,7 @@
 
 pub mod entry;
 pub mod index;
+pub mod mirror;
 pub mod paths;
 pub mod timestomp;
 
@@ -11,6 +12,9 @@ use forensic_rs::prelude::*;
 
 pub use entry::{AttrListState, DataStream, LoggedStream, MftEntry};
 pub use index::{MftIndex, Slot};
+pub use mirror::{
+    MftMirr, MirrorComparison, MirrorCounts, MirrorRecordCheck, MirrorSide, MirrorVerdict,
+};
 pub use paths::{PathStatus, ResolvedPath};
 
 use crate::anomaly::NtfsAnomaly;

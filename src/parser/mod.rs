@@ -5,6 +5,7 @@ pub mod companions;
 pub mod discovery;
 pub mod i30;
 pub mod mft;
+pub mod mirror;
 pub mod schema;
 pub mod sds;
 pub mod usn;
