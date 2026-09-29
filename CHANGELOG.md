@@ -20,8 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     stream that offset belongs to, the sequence and update sequence numbers as read, the header
     fields that differ, and the first differing byte. `$MFT` and `$MFTMirr` share the catalog name
     `NTFSMFTFiles`, so both are tagged `WindowsArtifacts::MFT`. A copy extracted with the fixups
-    already reverted (`ntfscat`) is `fixup_only`, not a mismatch. A `$MFTMirr` collected without
-    its `$MFT` is still parsed, and its summary says the check did not run.
+    already reverted (`ntfscat`) is `fixup_only`, not a mismatch; a side whose fixups do **not**
+    verify is `fixup_torn`, never absorbed into `fixup_only`. Only a `$MFTMirr` in the same
+    directory as a `$MFT` is cross-checked against it, and the check record's provenance retains
+    both files. A `$MFTMirr` collected without its `$MFT` is still parsed, and its summary says the
+    check did not run.
   - `$I30` (`indx`, `parser::I30ParserFactory`): `INDX` records, and slack carving behind a
     parent-checked gate, cross-checked against a companion `$MFT`.
   - `$UsnJrnl:$J` (`usn`, `parser::UsnParserFactory`): V2, V3 and V4 records, sparse-prefix

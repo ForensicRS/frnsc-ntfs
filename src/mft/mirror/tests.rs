@@ -1,5 +1,6 @@
 use super::*;
 use crate::fixtures::{MftBuilder, RecordBuilder, FILE_TIME_2020};
+use crate::fixup::FIXUP_STRIDE;
 use crate::source::BytesSource;
 
 const RS: usize = 1024;
@@ -37,7 +38,7 @@ fn a_faithful_copy_agrees_and_raises_nothing() {
     assert_eq!(c.record_size, RS as u32);
     assert_eq!(c.checks.len(), MIRRORED_RECORDS as usize);
     assert!(c.agrees());
-    assert_eq!(c.anomaly(), None);
+    assert_eq!(c.anomalies(), Vec::new());
     assert_eq!(c.counts().identical, MIRRORED_RECORDS);
     for (i, check) in c.checks.iter().enumerate() {
         assert_eq!(check.entry, i as u64);
@@ -68,13 +69,101 @@ fn a_copy_with_the_fixups_already_reverted_is_not_a_mismatch() {
     let c = compare(&mft, mirror);
     assert!(c.agrees(), "{:?}", c.disagreements().collect::<Vec<_>>());
     assert_eq!(c.counts().fixup_only, MIRRORED_RECORDS);
-    assert_eq!(c.anomaly(), None);
+    assert_eq!(c.anomalies(), Vec::new());
     let check = &c.checks[0];
     assert_eq!(check.verdict, MirrorVerdict::FixupOnly);
     assert_eq!(check.primary.fixup, Some(FixupStatus::Ok));
     assert_eq!(check.mirror.fixup, Some(FixupStatus::PreApplied));
     // Raw bytes still differ: the finding must be able to show exactly what was stored.
     assert_ne!(check.primary.raw, check.mirror.raw);
+}
+
+/// A record whose stride 0 still holds the USN while stride 1 already holds the saved bytes:
+/// half-reverted, which is what a torn write (or a tampered record) looks like. Its fixed-up bytes
+/// equal a clean copy's, so a comparison that only asks "do the fixed bytes match" would call it
+/// agreement and the torn status would never reach the analyst.
+fn half_revert_first_stride(record: &mut [u8]) {
+    // Stride 1's tail is the second saved value; put it back and leave stride 0 carrying the USN.
+    let usa = 0x30;
+    let saved = [record[usa + 4], record[usa + 5]];
+    record[2 * FIXUP_STRIDE - 2..2 * FIXUP_STRIDE].copy_from_slice(&saved);
+}
+
+#[test]
+fn a_torn_side_is_never_absorbed_into_fixup_only() {
+    let mut mft = mft_bytes();
+    let mirror = mirror_of(&mft);
+    half_revert_first_stride(&mut mft[..RS]);
+    let c = compare(&mft, mirror);
+
+    let check = &c.checks[0];
+    assert_eq!(
+        check.primary.fixup,
+        Some(FixupStatus::Torn {
+            mismatched: 1,
+            first: 1
+        })
+    );
+    assert_eq!(check.mirror.fixup, Some(FixupStatus::Ok));
+    // The content does agree — that is exactly why this used to pass as `fixup_only`.
+    assert_eq!(check.primary.fixed_bytes(), check.mirror.fixed_bytes());
+    assert!(check.verdict.content_agrees());
+    assert_eq!(check.verdict, MirrorVerdict::FixupTorn);
+    // ...but it is not clean, so it reaches the analyst as a check record with both sides.
+    assert!(!check.agrees());
+    assert!(c.disagreements().any(|d| d.entry == 0));
+    assert!(check.primary.raw.is_some() && check.mirror.raw.is_some());
+    assert_eq!(c.counts().fixup_torn, 1);
+    assert_eq!(c.counts().fixup_only, 0);
+    // A torn write is a checksum failure, not "the two copies hold different records".
+    assert_eq!(
+        c.anomalies(),
+        vec![NtfsAnomaly::MftMirrTorn { entries: vec![0] }]
+    );
+    assert_eq!(
+        check.anomaly(),
+        Some(NtfsAnomaly::MftMirrTorn { entries: vec![0] })
+    );
+}
+
+#[test]
+fn a_difference_in_the_header_padding_still_names_where_it_is() {
+    let mft = mft_bytes();
+    let mut mirror = mirror_of(&mft);
+    // Bytes 42..44 are header padding: no named field decodes them, and they are inside the
+    // header, so neither the field loop nor the body comparison sees them.
+    mirror[42] ^= 0xFF;
+    let c = compare(&mft, mirror);
+    let check = &c.checks[0];
+    assert_eq!(check.verdict, MirrorVerdict::Divergent);
+    assert_eq!(check.differing_fields, vec!["header_other"]);
+    assert_eq!(check.first_difference, Some(42));
+    assert!(check.to_string().contains("header_other"));
+}
+
+#[test]
+fn a_file_that_is_not_a_mirror_at_all_is_not_diagnosed_as_tampering() {
+    // A wrong-stream export named `$MFTMirr`: a clean multiple of the record size, so the size
+    // anomaly does not fire either. Not one slot holds a record header.
+    let boot =
+        crate::boot::BootSector::parse(&crate::fixtures::boot_sector(512, 2, 32767, 4, -10, 1))
+            .unwrap();
+    let junk: Vec<u8> = (0..4 * RS).map(|i| (i % 251) as u8).collect();
+    let mirr = MftMirr::open(Box::new(BytesSource(junk)), Some(&boot)).unwrap();
+    assert!(mirr.anomalies.is_empty(), "{:?}", mirr.anomalies);
+    let c = mirr.compare_with(&Mft::from_bytes(mft_bytes()).unwrap());
+
+    assert!(c.is_not_a_mirror());
+    assert_eq!(
+        c.anomalies(),
+        vec![NtfsAnomaly::MftMirrNotAMirror { slots: 4 }]
+    );
+    // The per-record evidence is untouched: both sides are still on every check.
+    assert_eq!(c.checks.len(), 4);
+    assert!(c.checks.iter().all(|x| x.mirror.raw.is_some()));
+    // A real mirror, even a badly damaged one, is not mistaken for this.
+    let real = compare(&mft_bytes(), mirror_of(&mft_bytes()));
+    assert!(!real.is_not_a_mirror());
 }
 
 #[test]
@@ -90,8 +179,8 @@ fn a_tampered_mirror_record_carries_both_sides_and_names_the_fields() {
 
     assert!(!c.agrees());
     assert_eq!(
-        c.anomaly(),
-        Some(NtfsAnomaly::MftMirrMismatch { entries: vec![3] })
+        c.anomalies(),
+        vec![NtfsAnomaly::MftMirrMismatch { entries: vec![3] }]
     );
     let counts = c.counts();
     assert_eq!(
@@ -152,8 +241,8 @@ fn a_truncated_trailing_record_is_an_err_item_not_a_panic() {
     // The primary side of the same record is still evidence and is kept.
     assert!(c.checks[3].primary.raw.is_some());
     assert_eq!(
-        c.anomaly(),
-        Some(NtfsAnomaly::MftMirrMismatch { entries: vec![3] })
+        c.anomalies(),
+        vec![NtfsAnomaly::MftMirrMismatch { entries: vec![3] }]
     );
 }
 

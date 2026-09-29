@@ -170,6 +170,8 @@ pub const MIRROR_COPY_ERROR: &str = "ntfs.mirror.copy.error";
 pub const MIRROR_COMPARED: &str = "ntfs.mirror.compared";
 pub const MIRROR_IDENTICAL: &str = "ntfs.mirror.identical";
 pub const MIRROR_FIXUP_ONLY: &str = "ntfs.mirror.fixup_only";
+/// Records whose content agrees but whose multi-sector protection does not verify on one side.
+pub const MIRROR_FIXUP_TORN: &str = "ntfs.mirror.fixup_torn";
 pub const MIRROR_DIVERGENT: &str = "ntfs.mirror.divergent";
 pub const MIRROR_UNREADABLE: &str = "ntfs.mirror.unreadable";
 /// Record numbers where the two copies disagree.

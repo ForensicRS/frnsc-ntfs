@@ -19,6 +19,11 @@
 //! volume a mismatch. The comparison here applies the fixups to both sides first, and reports
 //! [`MirrorVerdict::FixupOnly`] when only the multi-sector protection differs — consistent content,
 //! stored differently.
+//!
+//! Looking past that difference is only safe while both sides' protection verifies. A record torn
+//! mid-write reverts to the same content as a clean copy, so a side whose fixups do not verify is
+//! [`MirrorVerdict::FixupTorn`], never `FixupOnly`: the content agrees, how it was stored does not,
+//! and the analyst is told which side.
 
 use std::io::{Read, Seek};
 use std::sync::Arc;
@@ -67,6 +72,10 @@ pub struct MirrorSide {
     pub offset: u64,
     /// The record bytes exactly as stored, fixups **not** applied. `None` when the read failed.
     pub raw: Option<Vec<u8>>,
+    /// The same bytes with the fixups applied, kept next to `raw` rather than recomputed: the
+    /// comparison needs both, and what was read must survive next to what was resolved. A record
+    /// whose update sequence array is out of range is stored here as read.
+    pub fixed: Option<Vec<u8>>,
     /// Why the read failed. `Some` exactly when `raw` is `None`.
     pub unreadable: Option<String>,
     /// Sequence number as stored in the header, when a header could be read.
@@ -83,6 +92,7 @@ impl MirrorSide {
             stream,
             offset,
             raw: None,
+            fixed: None,
             unreadable: Some(why.into()),
             sequence: None,
             update_sequence: None,
@@ -107,6 +117,7 @@ impl MirrorSide {
             stream,
             offset,
             raw: Some(raw),
+            fixed: Some(fixed),
             unreadable: None,
             sequence: header.as_ref().map(|h| h.sequence),
             update_sequence,
@@ -119,15 +130,21 @@ impl MirrorSide {
         self.sequence.map(|s| FileRef::new(entry, s))
     }
 
-    /// The bytes with the fixups applied, when the record could be read and its header parsed.
+    /// The bytes with the fixups applied, when the record could be read.
     /// A record whose update sequence array is out of range is returned as read.
-    pub fn fixed_bytes(&self) -> Option<Vec<u8>> {
-        let raw = self.raw.as_ref()?;
-        let mut out = raw.clone();
-        if let Ok(h) = RecordHeader::parse(raw) {
-            apply_fixups(&mut out, h.usa_offset, h.usa_count);
-        }
-        Some(out)
+    pub fn fixed_bytes(&self) -> Option<&[u8]> {
+        self.fixed.as_deref()
+    }
+
+    /// Whether this side's multi-sector protection verifies. `false` when the record could not be
+    /// read, when its header would not parse, and when it was torn mid-write.
+    pub fn fixup_verifies(&self) -> bool {
+        self.fixup.is_some_and(FixupStatus::is_ok)
+    }
+
+    /// Whether a record header could be read from this side at all.
+    pub fn has_record_header(&self) -> bool {
+        self.sequence.is_some()
     }
 }
 
@@ -136,9 +153,15 @@ impl MirrorSide {
 pub enum MirrorVerdict {
     /// The two records are byte for byte identical as stored.
     Identical,
-    /// Identical once the fixups are applied: only the multi-sector protection differs, because
-    /// one copy was extracted with the fixups already reverted. The content agrees.
+    /// Identical once the fixups are applied, **and both sides' protection verifies**: only the
+    /// multi-sector protection differs, because one copy was extracted with the fixups already
+    /// reverted. The content agrees.
     FixupOnly,
+    /// Identical once the fixups are applied, but at least one side's protection does **not**
+    /// verify: that side was torn mid-write, or altered after it was written. The content agrees;
+    /// how it was stored does not. Reported rather than absorbed into [`Self::FixupOnly`], because
+    /// each side's `fixup` status only ever reaches output on a check record.
+    FixupTorn,
     /// The content differs. See [`MirrorRecordCheck::differing_fields`] and both sides' raw bytes.
     Divergent,
     /// One or both sides could not be read. See each side's `unreadable`.
@@ -151,14 +174,25 @@ impl MirrorVerdict {
         match self {
             MirrorVerdict::Identical => "identical",
             MirrorVerdict::FixupOnly => "fixup_only",
+            MirrorVerdict::FixupTorn => "fixup_torn",
             MirrorVerdict::Divergent => "divergent",
             MirrorVerdict::Unreadable => "unreadable",
         }
     }
 
-    /// Whether the two copies agree on the record's content.
+    /// Whether the check needs no attention: the two copies agree on the record's content **and**
+    /// both sides are intact as stored. [`Self::FixupTorn`] agrees on content but is not clean, so
+    /// it does not count here — the torn side has to reach the analyst.
     pub fn agrees(self) -> bool {
         matches!(self, MirrorVerdict::Identical | MirrorVerdict::FixupOnly)
+    }
+
+    /// Whether the two copies hold the same record content, however each was stored.
+    pub fn content_agrees(self) -> bool {
+        matches!(
+            self,
+            MirrorVerdict::Identical | MirrorVerdict::FixupOnly | MirrorVerdict::FixupTorn
+        )
     }
 }
 
@@ -180,9 +214,25 @@ pub struct MirrorRecordCheck {
 }
 
 impl MirrorRecordCheck {
-    /// Whether the two copies agree on this record's content.
+    /// Whether this record needs no attention: see [`MirrorVerdict::agrees`].
     pub fn agrees(&self) -> bool {
         self.verdict.agrees()
+    }
+
+    /// The anomaly this one record raises, or `None` when it is clean. The evidence stays on the
+    /// check; the anomaly only names what kind of disagreement it is.
+    pub fn anomaly(&self) -> Option<NtfsAnomaly> {
+        match self.verdict {
+            MirrorVerdict::Identical | MirrorVerdict::FixupOnly => None,
+            MirrorVerdict::FixupTorn => Some(NtfsAnomaly::MftMirrTorn {
+                entries: vec![self.entry],
+            }),
+            MirrorVerdict::Divergent | MirrorVerdict::Unreadable => {
+                Some(NtfsAnomaly::MftMirrMismatch {
+                    entries: vec![self.entry],
+                })
+            }
+        }
     }
 }
 
@@ -234,6 +284,7 @@ impl MirrorComparison {
             match check.verdict {
                 MirrorVerdict::Identical => c.identical += 1,
                 MirrorVerdict::FixupOnly => c.fixup_only += 1,
+                MirrorVerdict::FixupTorn => c.fixup_torn += 1,
                 MirrorVerdict::Divergent => c.divergent += 1,
                 MirrorVerdict::Unreadable => c.unreadable += 1,
             }
@@ -241,11 +292,53 @@ impl MirrorComparison {
         c
     }
 
-    /// The summary anomaly for the records that disagree, or `None` when they all agree. The
-    /// per-record evidence stays in [`Self::checks`]; the anomaly only names the record numbers.
-    pub fn anomaly(&self) -> Option<NtfsAnomaly> {
-        let entries: Vec<u64> = self.disagreements().map(|c| c.entry).collect();
-        (!entries.is_empty()).then_some(NtfsAnomaly::MftMirrMismatch { entries })
+    /// Whether no slot read from the copy holds a record header.
+    ///
+    /// A genuine `$MFTMirr` always has one in every mirrored slot, so this means the file is not a
+    /// mirror — a collection tool exported the wrong stream, or the name was reused. It is checked
+    /// before the divergence is diagnosed: comparing an unrelated file against the `$MFT` produces
+    /// a difference in every record, and calling that tampering would be wrong.
+    pub fn is_not_a_mirror(&self) -> bool {
+        let mut read = 0usize;
+        for check in self.checks.iter().filter(|c| c.mirror.raw.is_some()) {
+            if check.mirror.has_record_header() {
+                return false;
+            }
+            read += 1;
+        }
+        read > 0
+    }
+
+    /// The summary anomalies, in a fixed order, or empty when every record is clean. The
+    /// per-record evidence stays in [`Self::checks`]; an anomaly only names the record numbers.
+    pub fn anomalies(&self) -> Vec<NtfsAnomaly> {
+        if self.is_not_a_mirror() {
+            // Diagnosing "the first MFT records were tampered with" against a file that is not a
+            // mirror at all would point the analyst at the wrong thing.
+            return vec![NtfsAnomaly::MftMirrNotAMirror {
+                slots: self.checks.len() as u64,
+            }];
+        }
+        let mut out = Vec::new();
+        let differ: Vec<u64> = self
+            .checks
+            .iter()
+            .filter(|c| !c.verdict.content_agrees())
+            .map(|c| c.entry)
+            .collect();
+        if !differ.is_empty() {
+            out.push(NtfsAnomaly::MftMirrMismatch { entries: differ });
+        }
+        let torn: Vec<u64> = self
+            .checks
+            .iter()
+            .filter(|c| c.verdict == MirrorVerdict::FixupTorn)
+            .map(|c| c.entry)
+            .collect();
+        if !torn.is_empty() {
+            out.push(NtfsAnomaly::MftMirrTorn { entries: torn });
+        }
+        out
     }
 }
 
@@ -255,6 +348,7 @@ pub struct MirrorCounts {
     pub compared: u64,
     pub identical: u64,
     pub fixup_only: u64,
+    pub fixup_torn: u64,
     pub divergent: u64,
     pub unreadable: u64,
 }
@@ -496,14 +590,24 @@ fn compare_sides(entry: u64, primary: MirrorSide, mirror: MirrorSide) -> MirrorR
             first_difference: None,
         };
     }
-    let pfix = primary.fixed_bytes().unwrap_or_default();
-    let mfix = mirror.fixed_bytes().unwrap_or_default();
+    // Borrowed from each side, never copied: the fixed-up form was kept when the side was read.
+    let pfix: &[u8] = primary.fixed_bytes().unwrap_or_default();
+    let mfix: &[u8] = mirror.fixed_bytes().unwrap_or_default();
     if pfix == mfix {
+        // Looking past a raw byte difference is only safe when both sides' protection actually
+        // verifies. A torn side reverts to the same content as a clean mirror, so accepting it
+        // here would report a half-written (or altered) record as agreeing, and its `fixup`
+        // status would never reach output.
+        let verdict = if primary.fixup_verifies() && mirror.fixup_verifies() {
+            MirrorVerdict::FixupOnly
+        } else {
+            MirrorVerdict::FixupTorn
+        };
         return MirrorRecordCheck {
             entry,
             primary,
             mirror,
-            verdict: MirrorVerdict::FixupOnly,
+            verdict,
             differing_fields: Vec::new(),
             first_difference: None,
         };
@@ -514,7 +618,7 @@ fn compare_sides(entry: u64, primary: MirrorSide, mirror: MirrorSide) -> MirrorR
         .position(|(a, b)| a != b)
         .or(Some(pfix.len().min(mfix.len())));
     let mut differing_fields = Vec::new();
-    match (RecordHeader::parse(&pfix), RecordHeader::parse(&mfix)) {
+    match (RecordHeader::parse(pfix), RecordHeader::parse(mfix)) {
         (Ok(ph), Ok(mh)) => {
             for (name, get) in HEADER_FIELDS {
                 if get(&ph) != get(&mh) {
@@ -522,6 +626,12 @@ fn compare_sides(entry: u64, primary: MirrorSide, mirror: MirrorSide) -> MirrorR
                 }
             }
             let head = crate::record::header::HEADER_SIZE;
+            // The header has bytes no named field decodes (the padding before `record_number`).
+            // A difference there is still a difference: say where it is rather than report a
+            // divergence with an empty field list.
+            if differing_fields.is_empty() && pfix.get(..head) != mfix.get(..head) {
+                differing_fields.push("header_other");
+            }
             if pfix.get(head..) != mfix.get(head..) {
                 differing_fields.push("body");
             }

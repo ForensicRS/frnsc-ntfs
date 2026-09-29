@@ -116,7 +116,7 @@ impl ArtifactParserFactory for MftParserFactory {
                     return Ok(());
                 }
                 let cancelled = || cancellation.is_cancelled();
-                let (flow, mirror) = parse_one(
+                let flow = parse_one(
                     fs.as_ref(),
                     &path,
                     &host,
@@ -124,9 +124,9 @@ impl ArtifactParserFactory for MftParserFactory {
                     &store,
                     &opts,
                     &cancelled,
+                    &mut mirrors_done,
                     out,
                 );
-                mirrors_done.extend(mirror);
                 if flow.is_stop() {
                     return Ok(());
                 }
@@ -171,8 +171,9 @@ impl ArtifactParserFactory for MftParserFactory {
     }
 }
 
-/// Parses one `$MFT` and, when `opts.mirror` is set, the `$MFTMirr` beside it. Returns the flow
-/// and the `$MFTMirr` path that was handled, so it is not parsed again on its own.
+/// Parses one `$MFT` and, when `opts.mirror` is set, the `$MFTMirr` beside it. Any `$MFTMirr` it
+/// consumes is added to `mirrors_done`, so it is neither parsed again on its own nor paired with a
+/// second `$MFT`.
 #[allow(clippy::too_many_arguments)]
 fn parse_one(
     fs: &dyn FileSystem,
@@ -182,8 +183,9 @@ fn parse_one(
     store: &forensic_rs::provenance::ProvenanceStore,
     opts: &MftParserOptions,
     cancelled: &dyn Fn() -> bool,
+    mirrors_done: &mut BTreeSet<FPathBuf>,
     out: &mut dyn ParserOutput,
-) -> (OutputFlow, Option<FPathBuf>) {
+) -> OutputFlow {
     let boot = load_boot(fs, path);
     let owners = super::sds_owners(fs, path);
     let mft = match fs
@@ -192,7 +194,7 @@ fn parse_one(
         .and_then(|src| Mft::open(Box::new(src), boot.as_ref(), cancelled))
     {
         Ok(m) => m,
-        Err(e) => return (out.emit(Err(e.with_path(path))), None),
+        Err(e) => return out.emit(Err(e.with_path(path))),
     };
     let source = store.register_source(SourceKey::Path(path.as_str().to_string()));
     let prov_allocated = source.mint(acquisition, Recovery::Allocated);
@@ -212,13 +214,27 @@ fn parse_one(
     };
     let flow = emit_entries(&ctx, &mft, path, opts, cancelled, provenance, out);
     if flow.is_stop() || !opts.mirror {
-        return (flow, None);
+        return flow;
     }
-    // The `$MFTMirr` beside this `$MFT`, cross-checked against it.
-    let Some(mirror_path) = companion(fs, path, discovery::MFTMIRR_NAMES) else {
-        return (OutputFlow::Continue, None);
+    // The `$MFTMirr` beside this `$MFT`, cross-checked against it. Deliberately this directory
+    // only: a mirror found in a shared ancestor would be paired with every `$MFT` under it, and a
+    // multi-volume export would have one volume's mirror declare another volume's records
+    // tampered with.
+    let Some(mirror_path) = discovery::companion_in_dir(fs, path, discovery::MFTMIRR_NAMES) else {
+        return OutputFlow::Continue;
     };
-    let flow = super::mirror::parse_mirror(
+    // One `$MFTMirr` belongs to one `$MFT`. If an export put two (say `$MFT` and `$MFT.bin`) in
+    // the same directory, the first pairing stands and the second is left alone rather than
+    // silently cross-checked against the wrong primary.
+    if !mirrors_done.insert(mirror_path.clone()) {
+        forensic_rs::warn!(
+            "{} is already cross-checked against another $MFT; not paired with {}",
+            mirror_path.as_str(),
+            path.as_str()
+        );
+        return OutputFlow::Continue;
+    }
+    super::mirror::parse_mirror(
         fs,
         mirror_path.as_path(),
         Some((&mft, path)),
@@ -227,8 +243,7 @@ fn parse_one(
         acquisition,
         store,
         out,
-    );
-    (flow, Some(mirror_path))
+    )
 }
 
 /// One provenance id per recovery grade of the same `$MFT`.

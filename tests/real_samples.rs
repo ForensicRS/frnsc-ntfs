@@ -185,9 +185,14 @@ fn real_mftmirr_agrees_with_the_real_mft() {
         (counts.compared, counts.divergent, counts.unreadable),
         (MIRRORED_RECORDS, 0, 0)
     );
+    // Both sides' protection verifies (`PreApplied` and `Ok`), which is what makes looking past
+    // the raw byte difference safe here. A side that did not verify would be `FixupTorn`.
     assert_eq!(counts.fixup_only, MIRRORED_RECORDS);
+    assert_eq!(counts.fixup_torn, 0);
+    assert!(!c.is_not_a_mirror());
     for check in &c.checks {
         assert_eq!(check.verdict, MirrorVerdict::FixupOnly);
+        assert!(check.primary.fixup_verifies() && check.mirror.fixup_verifies());
         assert_eq!(check.primary.fixup, Some(FixupStatus::PreApplied));
         assert_eq!(check.mirror.fixup, Some(FixupStatus::Ok));
         assert_eq!(check.primary.sequence, check.mirror.sequence);
@@ -196,7 +201,7 @@ fn real_mftmirr_agrees_with_the_real_mft() {
             Some(boot.mft_record_size as usize)
         );
     }
-    assert_eq!(c.anomaly(), None);
+    assert_eq!(c.anomalies(), Vec::new());
 }
 
 #[test]
@@ -259,6 +264,7 @@ mod volume {
     use super::*;
     use frnsc_ntfs::volume::deleted::ContentStatus;
     use frnsc_ntfs::volume::{NtfsFs, Volume};
+    use frnsc_ntfs::NtfsAnomaly;
 
     fn open() -> Option<NtfsFs> {
         let path = forensic_testdata::artifact("ntfs-mkntfs-volume")?;
@@ -290,7 +296,16 @@ mod volume {
             assert_eq!(check.primary.raw, check.mirror.raw);
             assert_eq!(check.primary.fixup, Some(FixupStatus::Ok));
         }
-        assert_eq!(c.anomaly(), None);
+        assert_eq!(c.anomalies(), Vec::new());
+        // A real, complete volume: the mirror was reachable where its boot sector said, so the
+        // "could not be read" anomaly must not fire either.
+        assert!(
+            !vol.anomalies
+                .iter()
+                .any(|a| matches!(a, NtfsAnomaly::MftMirrUnreadable { .. })),
+            "{:?}",
+            vol.anomalies
+        );
     }
 
     #[test]

@@ -115,9 +115,31 @@ pub fn named(names: &'static [&'static str]) -> impl Fn(&str) -> bool {
 
 /// Looks for a companion file (e.g. `$Boot` next to `$MFT`) in the artifact's directory and up to
 /// two ancestors (KAPE puts `$J` under `$Extend`).
+///
+/// Only for companions whose pairing being wrong is harmless. A companion whose whole output is a
+/// disagreement between two sources must use [`companion_in_dir`]: in a multi-volume export, a
+/// shared ancestor pairs one volume's file with every other volume's, and the disagreement that
+/// follows is the tool's, not the evidence's.
 pub fn companion(fs: &dyn FileSystem, artifact: &FPath, names: &[&str]) -> Option<FPathBuf> {
+    companion_within(fs, artifact, names, 3)
+}
+
+/// Looks for a companion file in the artifact's own directory only.
+///
+/// This is the pairing to use when the two files are cross-checked against each other: two files
+/// collected side by side are evidence of the same volume, two files a directory apart are not.
+pub fn companion_in_dir(fs: &dyn FileSystem, artifact: &FPath, names: &[&str]) -> Option<FPathBuf> {
+    companion_within(fs, artifact, names, 1)
+}
+
+fn companion_within(
+    fs: &dyn FileSystem,
+    artifact: &FPath,
+    names: &[&str],
+    levels: u32,
+) -> Option<FPathBuf> {
     let mut dir = artifact.parent();
-    for _ in 0..3 {
+    for _ in 0..levels {
         let d = dir?;
         let Ok(entries) = fs.read_dir(d) else {
             dir = d.parent();

@@ -39,11 +39,17 @@ The workspace `AGENTS.md` applies. The rules below are specific to this crate.
   is `FixupStatus::PreApplied`, which is consistent and not an anomaly. Only a mix of values is
   `Torn`. The same asymmetry is why a `$MFT`/`$MFTMirr` comparison applies the fixups to both
   sides before deciding: raw bytes alone would call a clean volume a mismatch
-  (`MirrorVerdict::FixupOnly`).
+  (`MirrorVerdict::FixupOnly`). Looking past that difference is only safe while **both** sides
+  verify — a `Torn` side reverts to the same content as a clean copy, so it is
+  `MirrorVerdict::FixupTorn`, never `FixupOnly`.
 - **A cross-check carries both sides.** `$MFT` vs `$MFTMirr` is never reduced to a boolean: every
   `MirrorRecordCheck` keeps each side's raw record bytes as stored, the offset *and the stream it
   is relative to*, the sequence and update sequence numbers, and the fields that differ. Locate
   the mirror from the **boot sector**, never from the `$MFT` (that would be circular).
+- **Pair a cross-check from the same directory only** (`discovery::companion_in_dir`), and mint
+  its provenance by merging both files' sources. `companion` walks two ancestors, which is fine
+  for `$Boot` but not here: in a multi-volume export one volume's mirror would be paired with
+  every other volume's `$MFT`, and the "tampering" that follows would be the tool's.
 - **Recovery gates are strict.** Carved names must match the parent being scanned. Deleted
   content needs every stored cluster free and unclaimed. Don't add a fallback that returns
   partial content.

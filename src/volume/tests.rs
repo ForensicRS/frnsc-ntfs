@@ -248,6 +248,36 @@ fn damaged_volumes() {
         .anomalies
         .iter()
         .any(|a| matches!(a, NtfsAnomaly::MftMirrMismatch { .. })));
+    // A complete image whose boot sector points $MFTMirr past its end. `VolumeTruncated` compares
+    // the image against the size the boot sector declares and never looks at `mftmirr_lcn`, so
+    // "the mirror could not be read" has to be said on its own or nothing is said at all.
+    let mut img = clean.clone();
+    let n = img.len();
+    for at in [56usize, n - 512 + 56] {
+        img[at..at + 8].copy_from_slice(&512u64.to_le_bytes());
+    }
+    let v = Volume::open(Arc::new(BytesSource(img)), &|| false).expect("the volume still opens");
+    assert!(v.mirror.is_err(), "the mirror must not be readable here");
+    assert!(
+        !v.anomalies
+            .iter()
+            .any(|a| matches!(a, NtfsAnomaly::VolumeTruncated { .. })),
+        "this image is complete: {:?}",
+        v.anomalies
+    );
+    let unreadable = v
+        .anomalies
+        .iter()
+        .find_map(|a| match a {
+            NtfsAnomaly::MftMirrUnreadable { lcn, reason } => Some((*lcn, reason.clone())),
+            _ => None,
+        })
+        .expect("an unreadable $MFTMirr is a finding, not a log line");
+    assert_eq!(unreadable.0, 512);
+    assert!(
+        !unreadable.1.is_empty(),
+        "the read failure is kept verbatim"
+    );
     // Truncated image.
     let img = clean[..clean.len() - 8192].to_vec();
     if let Ok(v) = Volume::open(Arc::new(BytesSource(img)), &|| false) {

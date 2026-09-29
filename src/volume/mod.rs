@@ -99,7 +99,7 @@ pub struct Volume {
     /// Volume-level anomalies (boot sector, truncation, `$MFTMirr`, `$MFT` run list).
     pub anomalies: Vec<NtfsAnomaly>,
     /// The `$MFTMirr` cross-check, record by record with both sides, or why it could not run.
-    pub mirror: Result<MirrorComparison, String>,
+    pub mirror: ForensicResult<MirrorComparison>,
     tree: OnceLock<Tree>,
     bitmap: OnceLock<Result<ClusterBitmap, String>>,
 }
@@ -157,16 +157,29 @@ impl Volume {
             mft,
             mft_runs,
             anomalies,
-            mirror: Err("not checked".to_string()),
+            mirror: Err(error::invalid("$MFTMirr not checked")),
             tree: OnceLock::new(),
             bitmap: OnceLock::new(),
         };
         vol.mirror = vol.check_mirror();
         match &vol.mirror {
-            Ok(c) => vol.anomalies.extend(c.anomaly()),
-            // Not a finding by itself: a volume too short to hold its own mirror already carries
-            // `VolumeTruncated`. The reason stays on `Volume::mirror` for the caller.
-            Err(why) => forensic_rs::warn!("$MFTMirr not checked: {}", why),
+            Ok(c) => vol.anomalies.extend(c.anomalies()),
+            // "The mirror could not be read" is not the same as "the mirror agrees", and it is not
+            // covered by `VolumeTruncated`: that compares the image against the size the boot
+            // sector declares and never looks at `mftmirr_lcn`, so a boot sector pointing the
+            // mirror past the end of an otherwise complete volume would slip through both. The
+            // reason is kept verbatim, and also stays typed on `Volume::mirror`.
+            Err(e) => {
+                forensic_rs::warn!(
+                    "$MFTMirr at LCN {} not checked: {}",
+                    vol.boot.mftmirr_lcn,
+                    e
+                );
+                vol.anomalies.push(NtfsAnomaly::MftMirrUnreadable {
+                    lcn: vol.boot.mftmirr_lcn,
+                    reason: e.to_string(),
+                });
+            }
         }
         Ok(vol)
     }
@@ -174,10 +187,11 @@ impl Volume {
     /// Cross-checks the `$MFTMirr` at the LCN the **boot sector** declares against the `$MFT`.
     ///
     /// The locator is deliberately the boot sector's: asking the `$MFT` where its own mirror lives
-    /// would make the check circular. Each side's raw record bytes are kept on the result.
-    fn check_mirror(&self) -> Result<MirrorComparison, String> {
-        let mirr = MftMirr::at_boot_lcn(Arc::clone(&self.media), &self.boot)
-            .map_err(|e| format!("$MFTMirr at LCN {}: {e}", self.boot.mftmirr_lcn))?;
+    /// would make the check circular. Each side's raw record bytes are kept on the result. The
+    /// failure is returned as read, not reworded: the LCN it was looked for at travels on
+    /// [`NtfsAnomaly::MftMirrUnreadable`] instead.
+    fn check_mirror(&self) -> ForensicResult<MirrorComparison> {
+        let mirr = MftMirr::at_boot_lcn(Arc::clone(&self.media), &self.boot)?;
         Ok(mirr.compare_with(&self.mft))
     }
 

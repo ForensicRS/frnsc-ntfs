@@ -109,10 +109,14 @@ and raw (`*_raw`). A zero FILETIME gives no date.
   sides: `ntfs.mirror.primary.*` (the `$MFT`) and `ntfs.mirror.copy.*` (the `$MFTMirr`), each with
   the whole record hex-encoded exactly as stored, the offset, **the stream that offset is relative
   to**, the sequence and update sequence numbers, and the fixup status. `ntfs.mirror.verdict` is
-  `identical`, `fixup_only` (content agrees, only the multi-sector protection differs — what
-  `ntfscat` exports look like), `divergent` (with `ntfs.mirror.differing_fields` and
-  `ntfs.mirror.first_difference`) or `unreadable`. A `mftmirr_summary` is emitted either way, so
-  "checked and clean" is distinguishable from "not checked".
+  `identical`, `fixup_only` (content agrees and both sides' protection verifies — what `ntfscat`
+  exports look like), `fixup_torn` (content agrees but one side's protection does not verify: a
+  torn write, or a record altered after it was written), `divergent` (with
+  `ntfs.mirror.differing_fields` and `ntfs.mirror.first_difference`) or `unreadable`. A
+  `mftmirr_summary` is emitted either way, so "checked and clean" is distinguishable from "not
+  checked", and an unreadable mirror on a volume is `mft_mirr_unreadable`, not silence. The
+  cross-check is only made against a `$MFT` in the **same directory**, and its provenance retains
+  both files: a mirror paired across volumes would declare a clean volume tampered with.
 - **Damage is recorded, not refused.** This covers torn records, bad or pre-applied fixups, a
   `BAAD` signature, record number mismatches, a truncated `$MFT`, a `$MFTMirr` mismatch, the
   backup boot sector being used, a truncated image, malformed runs, `$SDS` hash or mirror

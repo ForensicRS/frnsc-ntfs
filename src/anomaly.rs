@@ -86,9 +86,18 @@ pub enum NtfsAnomaly {
     VolumeTruncated { declared: u64, actual: u64 },
     /// `$MFTMirr` records differ from the first `$MFT` records.
     MftMirrMismatch { entries: Vec<u64> },
+    /// The two copies of these records hold the same content, but at least one side's multi-sector
+    /// protection does not verify: that side was torn mid-write, or altered after it was written.
+    MftMirrTorn { entries: Vec<u64> },
+    /// The `$MFTMirr` the boot sector points at could not be read at all, so the cross-check did
+    /// not run. `reason` is the read failure verbatim.
+    MftMirrUnreadable { lcn: u64, reason: String },
     /// The file offered as a `$MFTMirr` holds far more records than any mirror does; only the
     /// first `read` were parsed and compared.
     MftMirrOversized { records: u64, read: u64 },
+    /// No slot read from the file offered as a `$MFTMirr` holds a record header: it is not a
+    /// mirror, so its records cannot be compared against the `$MFT` at all.
+    MftMirrNotAMirror { slots: u64 },
     /// A deleted file's clusters are allocated again in `$Bitmap`: its content is gone.
     ClustersReallocated { clusters: u64 },
     /// Two deleted files claim the same free clusters: neither content can be attributed.
@@ -124,7 +133,10 @@ impl NtfsAnomaly {
             NtfsAnomaly::BootBackupMismatch => "boot_backup_mismatch",
             NtfsAnomaly::VolumeTruncated { .. } => "volume_truncated",
             NtfsAnomaly::MftMirrMismatch { .. } => "mft_mirr_mismatch",
+            NtfsAnomaly::MftMirrTorn { .. } => "mft_mirr_torn",
+            NtfsAnomaly::MftMirrUnreadable { .. } => "mft_mirr_unreadable",
             NtfsAnomaly::MftMirrOversized { .. } => "mft_mirr_oversized",
+            NtfsAnomaly::MftMirrNotAMirror { .. } => "mft_mirr_not_a_mirror",
             NtfsAnomaly::ClustersReallocated { .. } => "clusters_reallocated",
             NtfsAnomaly::DeletedCrossClaim { .. } => "deleted_cross_claim",
         }
@@ -137,6 +149,7 @@ impl NtfsAnomaly {
             | NtfsAnomaly::FixupInvalid { .. }
             | NtfsAnomaly::BaadSignature
             | NtfsAnomaly::IndxFixupMismatch { .. }
+            | NtfsAnomaly::MftMirrTorn { .. }
             | NtfsAnomaly::SdsEntryMismatch { .. } => AnomalyFlags::CHECKSUM_MISMATCH,
             NtfsAnomaly::AttributeOverrun { .. }
             | NtfsAnomaly::MissingEndMarker
@@ -145,7 +158,8 @@ impl NtfsAnomaly {
             | NtfsAnomaly::MftFileSizeMismatch { .. }
             | NtfsAnomaly::PathTooDeep { .. }
             | NtfsAnomaly::RunlistMalformed { .. }
-            | NtfsAnomaly::UsnRecordMalformed { .. } => AnomalyFlags::TRUNCATED,
+            | NtfsAnomaly::UsnRecordMalformed { .. }
+            | NtfsAnomaly::MftMirrUnreadable { .. } => AnomalyFlags::TRUNCATED,
             NtfsAnomaly::ExtensionOrphan { .. }
             | NtfsAnomaly::ParentStale { .. }
             | NtfsAnomaly::ParentNotDirectory { .. }
@@ -157,7 +171,8 @@ impl NtfsAnomaly {
             | NtfsAnomaly::BootBackupUsed
             | NtfsAnomaly::BootBackupMismatch
             | NtfsAnomaly::MftMirrMismatch { .. }
-            | NtfsAnomaly::MftMirrOversized { .. } => AnomalyFlags::SOURCE_DIVERGENCE,
+            | NtfsAnomaly::MftMirrOversized { .. }
+            | NtfsAnomaly::MftMirrNotAMirror { .. } => AnomalyFlags::SOURCE_DIVERGENCE,
             NtfsAnomaly::VolumeTruncated { .. } => AnomalyFlags::TRUNCATED,
             NtfsAnomaly::ClustersReallocated { .. } | NtfsAnomaly::DeletedCrossClaim { .. } => {
                 AnomalyFlags::ALLOCATION_CONFLICT
@@ -209,7 +224,14 @@ impl NtfsAnomaly {
             NtfsAnomaly::MftMirrMismatch { .. } => {
                 "an interrupted write or a chkdsk repair; otherwise tampering with the first MFT records"
             }
-            NtfsAnomaly::MftMirrOversized { .. } => {
+            NtfsAnomaly::MftMirrTorn { .. } => {
+                "torn write: power loss, or the record changed while a live system was being acquired"
+            }
+            NtfsAnomaly::MftMirrUnreadable { .. } => {
+                "an incomplete acquisition, or a volume resized without its boot sector being \
+                 rewritten; otherwise a boot sector pointing the mirror somewhere it is not"
+            }
+            NtfsAnomaly::MftMirrOversized { .. } | NtfsAnomaly::MftMirrNotAMirror { .. } => {
                 "the file is not a $MFTMirr: a collection tool exported the wrong stream, or the \
                  name was reused"
             }
@@ -327,8 +349,24 @@ impl fmt::Display for NtfsAnomaly {
             NtfsAnomaly::MftMirrMismatch { entries } => {
                 write!(f, "$MFTMirr differs for entries {entries:?}")
             }
+            NtfsAnomaly::MftMirrTorn { entries } => {
+                write!(
+                    f,
+                    "$MFTMirr and $MFT agree on entries {entries:?}, but the multi-sector \
+                     protection does not verify on one side"
+                )
+            }
+            NtfsAnomaly::MftMirrUnreadable { lcn, reason } => {
+                write!(f, "$MFTMirr at LCN {lcn} could not be read: {reason}")
+            }
             NtfsAnomaly::MftMirrOversized { records, read } => {
                 write!(f, "$MFTMirr holds {records} records, only {read} read")
+            }
+            NtfsAnomaly::MftMirrNotAMirror { slots } => {
+                write!(
+                    f,
+                    "none of the {slots} slot(s) read from this $MFTMirr holds a record header"
+                )
             }
             NtfsAnomaly::ClustersReallocated { clusters } => {
                 write!(

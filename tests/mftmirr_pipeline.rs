@@ -9,7 +9,7 @@ use common::{by_field, one, run};
 use forensic_rs::dictionary;
 use forensic_rs::prelude::testing::InMemoryVirtualFileSystem;
 use forensic_rs::prelude::*;
-use forensic_rs::provenance::AnomalyFlags;
+use forensic_rs::provenance::{AnomalyFlags, DerivedFrom, MergeReason, SourceKey};
 use frnsc_ntfs::fields as f;
 use frnsc_ntfs::fixtures::{MftBuilder, RecordBuilder, FILE_TIME_2020 as T};
 use frnsc_ntfs::mft::mirror::{MIRRORED_RECORDS, STREAM_MFT, STREAM_MFTMIRR};
@@ -187,6 +187,112 @@ fn a_truncated_mirror_is_an_err_item_and_the_run_goes_on() {
     let summary = one(&r.records, f::RECORD_TYPE, f::RECORD_TYPE_MFTMIRR_SUMMARY);
     assert_eq!(summary.field_as_u64(f::MIRROR_UNREADABLE), Some(1));
     assert!(summary.anomalies().has(AnomalyFlags::TRUNCATED));
+}
+
+#[test]
+fn a_mirror_in_a_shared_ancestor_is_not_paired_with_every_mft() {
+    // A multi-volume export where only volume C's mirror was collected and landed in the case
+    // root. Pairing it with D's `$MFT` would declare a clean volume tampered with, and would emit
+    // the mirror's records once per `$MFT`.
+    let mft = sample_mft();
+    let fs: Arc<dyn FileSystem> = Arc::new(
+        InMemoryVirtualFileSystem::new()
+            .with_file("case/$MFTMirr", mirror_of(&mft))
+            .with_file("case/C/$MFT", mft.clone())
+            .with_file("case/D/$MFT", mft),
+    );
+    let r = run(fs, vec![Arc::new(MftParserFactory::default())]);
+    assert!(r.result.errors.is_empty(), "{:?}", r.result.errors);
+
+    // The mirror is still parsed — on its own, exactly once.
+    let entries = by_field(&r.records, f::RECORD_TYPE, f::RECORD_TYPE_MFTMIRR_ENTRY);
+    assert_eq!(entries.len(), MIRRORED_RECORDS as usize);
+    let summary = one(&r.records, f::RECORD_TYPE, f::RECORD_TYPE_MFTMIRR_SUMMARY);
+    assert_eq!(summary.field_as_u64(f::MIRROR_COMPARED), Some(0));
+    assert_eq!(summary.field_as_str(dictionary::FILE_PATH), None);
+    // ...and nothing is claimed about either volume's integrity.
+    assert!(by_field(&r.records, f::RECORD_TYPE, f::RECORD_TYPE_MFTMIRR_CHECK).is_empty());
+    assert!(r.findings.is_empty(), "{:?}", r.findings);
+}
+
+#[test]
+fn one_mirror_is_cross_checked_against_one_mft() {
+    // Two `$MFT`s in one directory (`$MFT` and an exported `$MFT.bin`). The mirror belongs to one
+    // of them; cross-checking it against both would double every record it emits.
+    let mft = sample_mft();
+    let fs: Arc<dyn FileSystem> = Arc::new(
+        InMemoryVirtualFileSystem::new()
+            .with_file("evidence/C/$MFT", mft.clone())
+            .with_file("evidence/C/$MFT.bin", mft.clone())
+            .with_file("evidence/C/$MFTMirr", mirror_of(&mft)),
+    );
+    let r = run(fs, vec![Arc::new(MftParserFactory::default())]);
+    assert_eq!(
+        by_field(&r.records, f::RECORD_TYPE, f::RECORD_TYPE_MFTMIRR_ENTRY).len(),
+        MIRRORED_RECORDS as usize
+    );
+    let summary = one(&r.records, f::RECORD_TYPE, f::RECORD_TYPE_MFTMIRR_SUMMARY);
+    assert_eq!(summary.field_as_u64(f::MIRROR_COMPARED), Some(4));
+}
+
+#[test]
+fn a_cross_check_record_names_both_files_it_was_read_from() {
+    let mft = sample_mft();
+    let mut mirror = mirror_of(&mft);
+    mirror[3 * RS + 300] ^= 0xFF;
+    let r = run(
+        fs_with(mft, Some(mirror)),
+        vec![Arc::new(MftParserFactory::default())],
+    );
+    let check = one(&r.records, f::RECORD_TYPE, f::RECORD_TYPE_MFTMIRR_CHECK);
+    // Half of what this record carries is `$MFT` bytes, so the `$MFT` has to be retained as a
+    // source: a chain of custody for the finding that named only the mirror would be wrong.
+    let snapshot = r
+        .store
+        .get(check.provenance())
+        .expect("the check record's provenance resolves");
+    let DerivedFrom::Merged(parents, reason) = &snapshot.derived_from else {
+        panic!("expected a merge, got {:?}", snapshot.derived_from);
+    };
+    assert_eq!(*reason, MergeReason::Reconciliation);
+    let sources: Vec<SourceKey> = parents
+        .iter()
+        .map(|p| r.store.get(*p).expect("parent resolves").source)
+        .collect();
+    assert!(sources.contains(&SourceKey::Path("evidence/C/$MFTMirr".into())));
+    assert!(sources.contains(&SourceKey::Path("evidence/C/$MFT".into())));
+}
+
+#[test]
+fn a_torn_primary_record_reaches_the_analyst_instead_of_passing_as_fixup_only() {
+    // Half-revert stride 1 of `$MFT` record 0: the fixed-up bytes still equal the mirror's, so
+    // only the fixup status tells the analyst the record was torn — and that status only ever
+    // reaches output on a check record.
+    let mut mft = sample_mft();
+    let mirror = mirror_of(&mft);
+    let saved = [mft[0x34], mft[0x35]];
+    mft[1022..1024].copy_from_slice(&saved);
+    let r = run(
+        fs_with(mft, Some(mirror)),
+        vec![Arc::new(MftParserFactory::default())],
+    );
+
+    let check = one(&r.records, f::RECORD_TYPE, f::RECORD_TYPE_MFTMIRR_CHECK);
+    assert_eq!(check.field_as_u64(f::ENTRY), Some(0));
+    assert_eq!(check.field_as_str(f::MIRROR_VERDICT), Some("fixup_torn"));
+    assert_eq!(check.field_as_str(f::MIRROR_PRIMARY_FIXUP), Some("torn"));
+    assert_eq!(check.field_as_str(f::MIRROR_COPY_FIXUP), Some("ok"));
+    assert!(check.field_as_str(f::MIRROR_PRIMARY_HEX).is_some());
+    assert!(check.field_as_str(f::MIRROR_COPY_HEX).is_some());
+    // A torn write is a failed integrity check, not "the two copies hold different records".
+    assert!(check.anomalies().has(AnomalyFlags::CHECKSUM_MISMATCH));
+    assert!(!check.anomalies().has(AnomalyFlags::SOURCE_DIVERGENCE));
+
+    let summary = one(&r.records, f::RECORD_TYPE, f::RECORD_TYPE_MFTMIRR_SUMMARY);
+    assert_eq!(summary.field_as_u64(f::MIRROR_FIXUP_TORN), Some(1));
+    assert_eq!(summary.field_as_u64(f::MIRROR_FIXUP_ONLY), Some(0));
+    assert_eq!(summary.field_as_u64(f::MIRROR_DIVERGENT), Some(0));
+    assert!(summary.anomalies().has(AnomalyFlags::CHECKSUM_MISMATCH));
 }
 
 #[test]

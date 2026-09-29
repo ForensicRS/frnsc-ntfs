@@ -7,7 +7,9 @@
 
 use forensic_rs::dictionary;
 use forensic_rs::prelude::*;
-use forensic_rs::provenance::{Acquisition, ProvenanceId, ProvenanceStore, Recovery, SourceKey};
+use forensic_rs::provenance::{
+    Acquisition, MergeReason, ProvenanceId, ProvenanceStore, Recovery, SourceKey,
+};
 
 use super::hex;
 use super::schema::mft_artifact;
@@ -55,6 +57,18 @@ pub fn parse_mirror(
     };
     let source = store.register_source(SourceKey::Path(path.as_str().to_string()));
     let prov = source.mint(acquisition, Recovery::Allocated);
+    // A cross-check record is half `$MFT` bytes and half `$MFTMirr` bytes. Minting it from the
+    // mirror alone would attribute the primary's raw record to the wrong file, and a chain of
+    // custody for the finding would not list the `$MFT` at all. `register_source` is interned, so
+    // naming the `$MFT` again here costs nothing.
+    let cross_prov = mft.map(|(_, mft_path)| {
+        let mft_source = store.register_source(SourceKey::Path(mft_path.as_str().to_string()));
+        let mft_prov = mft_source.mint(acquisition, Recovery::Allocated);
+        (
+            store.merge(&[prov, mft_prov], MergeReason::Reconciliation),
+            store.merge(&[prov, mft_prov], MergeReason::CrossSourceCorroboration),
+        )
+    });
     let ctx = MirrorContext {
         host,
         source_path: path.as_str(),
@@ -84,10 +98,13 @@ pub fn parse_mirror(
     }
 
     let comparison = mft.map(|(m, _)| mirr.compare_with(m));
+    // A disagreement is reconciled evidence from both files; a summary that ran is the two files
+    // corroborating each other. Either way both sources are retained on the record.
+    let (check_prov, summary_prov) = cross_prov.unwrap_or((prov, prov));
     if let Some(c) = &comparison {
         for check in c.disagreements() {
             if out
-                .emit(Ok(mirror_check_record(&ctx, check, prov)))
+                .emit(Ok(mirror_check_record(&ctx, check, check_prov)))
                 .is_stop()
             {
                 return OutputFlow::Stop;
@@ -98,7 +115,7 @@ pub fn parse_mirror(
         &ctx,
         comparison.as_ref(),
         &mirr.anomalies,
-        prov,
+        summary_prov,
     )))
 }
 
@@ -237,14 +254,16 @@ pub fn mirror_check_record(
             f::MIRROR_COPY_ERROR,
         ],
     );
-    let anomaly = crate::NtfsAnomaly::MftMirrMismatch {
-        entries: vec![check.entry],
-    };
-    let (names, core) = to_core(std::slice::from_ref(&anomaly));
-    d.set_parsed(
-        f::ANOMALIES,
-        forensic_rs::provenance::Parsed::with_anomalies(names, core, prov),
-    );
+    // The kind of disagreement, not a blanket "mismatch": a record the two copies agree on but
+    // whose protection does not verify is a torn write, and saying "$MFTMirr differs" would point
+    // the analyst at the wrong thing.
+    if let Some(anomaly) = check.anomaly() {
+        let (names, core) = to_core(std::slice::from_ref(&anomaly));
+        d.set_parsed(
+            f::ANOMALIES,
+            forensic_rs::provenance::Parsed::with_anomalies(names, core, prov),
+        );
+    }
     d
 }
 
@@ -267,13 +286,13 @@ pub fn mirror_summary_record(
     match comparison {
         Some(c) => {
             let counts = c.counts();
-            d.set(
-                dictionary::FILE_PATH,
-                ctx.mft_path.unwrap_or("").to_string(),
-            );
+            if let Some(p) = ctx.mft_path {
+                d.set(dictionary::FILE_PATH, p.to_string());
+            }
             d.set(f::MIRROR_COMPARED, counts.compared);
             d.set(f::MIRROR_IDENTICAL, counts.identical);
             d.set(f::MIRROR_FIXUP_ONLY, counts.fixup_only);
+            d.set(f::MIRROR_FIXUP_TORN, counts.fixup_torn);
             d.set(f::MIRROR_DIVERGENT, counts.divergent);
             d.set(f::MIRROR_UNREADABLE, counts.unreadable);
             let disagreements: Vec<u64> = c.disagreements().map(|x| x.entry).collect();
@@ -283,7 +302,7 @@ pub fn mirror_summary_record(
                     super::texts(disagreements.iter().map(u64::to_string)),
                 );
             }
-            all.extend(c.anomaly());
+            all.extend(c.anomalies());
         }
         // No `$MFT` next to this copy: say the check did not run rather than imply it passed.
         None => d.set(f::MIRROR_COMPARED, 0u64),
