@@ -49,6 +49,11 @@ impl Default for UsnParserFactory {
     }
 }
 
+/// The ForensicArtifacts definition this parser reads: the change journal. Declared, not used to
+/// locate files: the definition names only `$Extend\$UsnJrnl`, not the `$J` stream or the names
+/// export tools give it, which [`super::discovery::USN_NAMES`] matches.
+pub const DEFINITION: &str = "NTFSUSNJournal";
+
 impl UsnParserFactory {
     pub fn new(opts: UsnParserOptions) -> Self {
         Self {
@@ -59,7 +64,10 @@ impl UsnParserFactory {
                  and data changes, with paths resolved through the $MFT when present",
                 env!("CARGO_PKG_VERSION"),
             )
-            .with_artifacts(vec![usn_artifact()]),
+            .with_artifacts(vec![usn_artifact()])
+            .with_requirements(vec![Requirement::Artifact(ArtifactRef::from_static(
+                DEFINITION,
+            ))]),
             opts,
         }
     }

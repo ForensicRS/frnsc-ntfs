@@ -61,6 +61,11 @@ impl Default for MftParserFactory {
     }
 }
 
+/// The ForensicArtifacts definition this parser reads: `$MFT` and `$MFTMirr`. Declared, not used
+/// to locate files: [`super::discovery`] already finds both by name, and also under the spellings
+/// export tools use, which the definition doesn't list.
+pub const DEFINITION: &str = "NTFSMFTFiles";
+
 impl MftParserFactory {
     pub fn new(opts: MftParserOptions) -> Self {
         Self {
@@ -73,7 +78,10 @@ impl MftParserFactory {
                  the $MFT it sits next to",
                 env!("CARGO_PKG_VERSION"),
             )
-            .with_artifacts(vec![Artifact::Windows(WindowsArtifacts::MFT)]),
+            .with_artifacts(vec![Artifact::Windows(WindowsArtifacts::MFT)])
+            .with_requirements(vec![Requirement::Artifact(ArtifactRef::from_static(
+                DEFINITION,
+            ))]),
             opts,
         }
     }
